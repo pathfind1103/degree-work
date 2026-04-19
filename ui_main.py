@@ -8,7 +8,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QFormLayout, QTextEdit, QFrame,
-    QPushButton, QLabel
+    QPushButton, QLabel, QSizePolicy
 )
 from PyQt6.QtCore import Qt
 
@@ -76,17 +76,19 @@ class MainWindowUI(QMainWindow):
         self.info_display.setStyleSheet(STYLE_INFO_BOX)
         self.left_panel.addWidget(self.info_display)
 
-        # Область отображения формулы (QLabel для статичного изображения)
+        # Область отображения формулы (QLabel с адаптивной высотой)
         self.left_panel.addWidget(QLabel("<b>Математический аппарат (LaTeX):</b>"))
         self.formula_label = QLabel()
-        self.formula_label.setMinimumHeight(100)
         self.formula_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.formula_label.setStyleSheet(STYLE_FORMULA_LABEL)
+        # Позволяем метке менять высоту в зависимости от картинки
+        self.formula_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.left_panel.addWidget(self.formula_label)
 
-        # Служебная фигура Matplotlib для генерации изображения формулы (скрытая)
+        # Невидимая фигура для генерации изображения формулы.
+        # Увеличиваем высоту (figsize), чтобы сложные системы уравнений не обрезались.
         self.formula_fig, self.formula_ax = plt.subplots(
-            figsize=(4, 1),
+            figsize=(4, 2.5),
             facecolor=FORMULA_PANEL_COLOR
         )
         self.formula_ax.axis('off')
@@ -109,15 +111,13 @@ class MainWindowUI(QMainWindow):
         self.calc_btn.setStyleSheet(STYLE_CALC_BUTTON)
         self.left_panel.addWidget(self.calc_btn)
 
-        # Прижимаем элементы к верху и добавляем панель в главный слой
-        self.left_panel.addStretch()
+        # addStretch() выталкивает все элементы вверх,
+        # позволяя им "раздвигаться" при необходимости.
+        self.left_panel.addStretch(1)
         self.main_layout.addLayout(self.left_panel, 1)
 
     def _create_chart_area(self):
         """Создание области графиков в центральной части окна."""
-        # Создаем фигуру Matplotlib для основного графика
         self.main_fig, self.main_ax = plt.subplots(figsize=(8, 6))
         self.main_canvas = FigureCanvas(self.main_fig)
-
-        # Добавляем холст в главный слой
         self.main_layout.addWidget(self.main_canvas, 3)

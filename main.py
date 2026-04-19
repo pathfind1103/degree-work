@@ -5,9 +5,11 @@
 
 import sys
 import importlib.util
+import io
 from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication, QLineEdit
+from PyQt6.QtGui import QPixmap
 
 from ui_main import MainWindowUI
 
@@ -34,8 +36,6 @@ class TrajectoryApp(MainWindowUI):
     def _load_models(self):
         """
         Динамически загружает файлы моделей из директории 'models'.
-        Каждый файл должен содержать функции get_name(), get_info(),
-        get_params() и calculate().
         """
         models_dir = Path(__file__).parent / "models"
         models_dir.mkdir(exist_ok=True)
@@ -59,12 +59,9 @@ class TrajectoryApp(MainWindowUI):
 
     def _on_model_changed(self):
         """
-        Обновляет интерфейс (описание, формулу и поля ввода)
-        при выборе другой модели в списке.
+        Обновляет интерфейс при выборе другой модели.
+        Использует QPixmap для стабильного отображения LaTeX без вылетов.
         """
-        import io
-        from PyQt6.QtGui import QPixmap
-
         model_name = self.model_combo.currentText()
         if not model_name or model_name not in self.models:
             return
@@ -72,36 +69,39 @@ class TrajectoryApp(MainWindowUI):
         model = self.models[model_name]
         info = model.get_info()
 
-        # 1. Обновление текстового описания и списка переменных
+        # 1. Обновление текстового описания
         vars_info = info.get("parameters_info", {})
-        vars_text = "\n".join(
-            [f"• {k} — {v}" for k, v in vars_info.items()]
-        )
+        vars_text = "\n".join([f"• {k} — {v}" for k, v in vars_info.items()])
         description = info.get("description", "Описание отсутствует.")
         self.info_display.setText(f"{description}\n\nОбозначения:\n{vars_text}")
 
-        # 2. Безопасный рендеринг математической формулы через QPixmap
+        # 2. Безопасный рендеринг формулы (фикс вылетов и обрезки)
         try:
             self.formula_ax.clear()
             self.formula_ax.axis('off')
 
-            # Рендерим текст формулы на скрытую фигуру
+            # Рисуем текст формулы
             self.formula_ax.text(
                 0.5, 0.5,
                 info.get("formula", ""),
-                fontsize=14,
+                fontsize=13,
                 ha='center',
                 va='center',
                 math_fontfamily='cm'
             )
-            self.formula_fig.tight_layout(pad=0)
 
-            # Сохраняем фигуру в буфер как PNG
+            # Вместо tight_layout используем bbox_inches при сохранении
             buf = io.BytesIO()
-            self.formula_fig.savefig(buf, format='png', dpi=100, facecolor='#f0f0f0')
+            self.formula_fig.savefig(
+                buf,
+                format='png',
+                dpi=110,
+                facecolor='#f0f0f0',
+                bbox_inches='tight', # Убирает пустые поля вокруг формулы
+                pad_inches=0.1
+            )
             buf.seek(0)
 
-            # Превращаем буфер в QPixmap и устанавливаем в QLabel
             pixmap = QPixmap()
             pixmap.loadFromData(buf.getvalue())
             self.formula_label.setPixmap(pixmap)
@@ -126,24 +126,16 @@ class TrajectoryApp(MainWindowUI):
         self.param_widgets.clear()
 
     def run_calculation(self):
-        """
-        Собирает введенные параметры, вызывает метод расчета выбранной
-        модели и отображает результат на графике.
-        """
+        """Выполнение расчета и отрисовка графика."""
         model_name = self.model_combo.currentText()
         if not model_name:
             return
 
-        # Сбор данных из полей ввода
-        params = {
-            name: widget.text() for name, widget in self.param_widgets.items()
-        }
+        params = {name: widget.text() for name, widget in self.param_widgets.items()}
 
         try:
-            # Выполнение физического расчета
             x, y, label = self.models[model_name].calculate(params)
 
-            # Обновление главного графика
             self.main_ax.clear()
             self.main_ax.plot(x, y, 'b-', lw=2, label=label)
             self.main_ax.set_title(f"Результат: {model_name}")
@@ -152,13 +144,11 @@ class TrajectoryApp(MainWindowUI):
             self.main_ax.grid(True, ls='--', alpha=0.6)
             self.main_ax.legend()
             self.main_canvas.draw()
-
         except Exception as err:
             self.info_display.setText(f"ОШИБКА РАСЧЕТА:\n{err}")
 
 
 if __name__ == "__main__":
-    # Инициализация и запуск приложения
     app = QApplication(sys.argv)
     window = TrajectoryApp()
     window.show()
