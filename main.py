@@ -62,6 +62,9 @@ class TrajectoryApp(MainWindowUI):
         Обновляет интерфейс (описание, формулу и поля ввода)
         при выборе другой модели в списке.
         """
+        import io
+        from PyQt6.QtGui import QPixmap
+
         model_name = self.model_combo.currentText()
         if not model_name or model_name not in self.models:
             return
@@ -69,7 +72,7 @@ class TrajectoryApp(MainWindowUI):
         model = self.models[model_name]
         info = model.get_info()
 
-        # Обновление текстового описания и списка переменных
+        # 1. Обновление текстового описания и списка переменных
         vars_info = info.get("parameters_info", {})
         vars_text = "\n".join(
             [f"• {k} — {v}" for k, v in vars_info.items()]
@@ -77,17 +80,37 @@ class TrajectoryApp(MainWindowUI):
         description = info.get("description", "Описание отсутствует.")
         self.info_display.setText(f"{description}\n\nОбозначения:\n{vars_text}")
 
-        # Рендеринг математической формулы (LaTeX)
-        self.formula_ax.clear()
-        self.formula_ax.axis('off')
-        self.formula_ax.text(
-            0.5, 0.5, info.get("formula", ""),
-            fontsize=14, ha='center', va='center'
-        )
-        self.formula_fig.tight_layout(pad=0)
-        self.formula_canvas.draw()
+        # 2. Безопасный рендеринг математической формулы через QPixmap
+        try:
+            self.formula_ax.clear()
+            self.formula_ax.axis('off')
 
-        # Пересоздание динамической формы параметров
+            # Рендерим текст формулы на скрытую фигуру
+            self.formula_ax.text(
+                0.5, 0.5,
+                info.get("formula", ""),
+                fontsize=14,
+                ha='center',
+                va='center',
+                math_fontfamily='cm'
+            )
+            self.formula_fig.tight_layout(pad=0)
+
+            # Сохраняем фигуру в буфер как PNG
+            buf = io.BytesIO()
+            self.formula_fig.savefig(buf, format='png', dpi=100, facecolor='#f0f0f0')
+            buf.seek(0)
+
+            # Превращаем буфер в QPixmap и устанавливаем в QLabel
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.getvalue())
+            self.formula_label.setPixmap(pixmap)
+            buf.close()
+        except Exception as e:
+            self.formula_label.setText("Ошибка рендеринга формулы")
+            print(f"Render error: {e}")
+
+        # 3. Пересоздание динамической формы параметров
         self._clear_params()
         for p_name, p_val in model.get_params().items():
             edit = QLineEdit(str(p_val))

@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QFormLayout, QTextEdit, QFrame,
     QPushButton, QLabel
 )
+from PyQt6.QtCore import Qt
 
 # --- КОНСТАНТЫ ОФОРМЛЕНИЯ (PEP 8) ---
 STYLE_INFO_BOX = (
@@ -23,6 +24,11 @@ STYLE_CALC_BUTTON = (
     "color: white; "
     "font-weight: bold; "
     "border-radius: 4px;"
+)
+STYLE_FORMULA_LABEL = (
+    "background-color: #f0f0f0; "
+    "border: 1px solid #ccc; "
+    "border-radius: 2px;"
 )
 FORMULA_PANEL_COLOR = '#f0f0f0'
 
@@ -70,16 +76,20 @@ class MainWindowUI(QMainWindow):
         self.info_display.setStyleSheet(STYLE_INFO_BOX)
         self.left_panel.addWidget(self.info_display)
 
-        # Область отображения формулы (Matplotlib Canvas)
+        # Область отображения формулы (QLabel для статичного изображения)
         self.left_panel.addWidget(QLabel("<b>Математический аппарат (LaTeX):</b>"))
+        self.formula_label = QLabel()
+        self.formula_label.setMinimumHeight(100)
+        self.formula_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.formula_label.setStyleSheet(STYLE_FORMULA_LABEL)
+        self.left_panel.addWidget(self.formula_label)
+
+        # Служебная фигура Matplotlib для генерации изображения формулы (скрытая)
         self.formula_fig, self.formula_ax = plt.subplots(
-            figsize=(3, 1),
+            figsize=(4, 1),
             facecolor=FORMULA_PANEL_COLOR
         )
         self.formula_ax.axis('off')
-        self.formula_canvas = FigureCanvas(self.formula_fig)
-        self.formula_canvas.setMaximumHeight(100)
-        self.left_panel.addWidget(self.formula_canvas)
 
         # Разделительная линия
         separator = QFrame()
@@ -109,5 +119,5 @@ class MainWindowUI(QMainWindow):
         self.main_fig, self.main_ax = plt.subplots(figsize=(8, 6))
         self.main_canvas = FigureCanvas(self.main_fig)
 
-        # Добавляем холст в главный слой (соотношение сторон 3 к 1)
+        # Добавляем холст в главный слой
         self.main_layout.addWidget(self.main_canvas, 3)
