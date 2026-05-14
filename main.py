@@ -7,6 +7,7 @@ import sys
 import importlib.util
 import io
 from pathlib import Path
+import numpy as np
 
 from PyQt6.QtWidgets import QApplication, QLineEdit
 from PyQt6.QtGui import QPixmap
@@ -142,37 +143,78 @@ class TrajectoryApp(MainWindowUI):
             self.main_fig.clf()  # Полностью очищаем фигуру
 
             if is_3d:
-                # Включаем интерактивный 3D-режим рендеринга
+                self.main_fig.clf()
                 self.main_ax = self.main_fig.add_subplot(111, projection='3d')
 
-                # Рисуем пучок трехмерных линий
-                for traj in result:
-                    # traj[:, 0] - X (дальность), traj[:, 2] - Z (боковой снос), traj[:, 1] - Y (высота)
-                    self.main_ax.plot(traj[:, 0], traj[:, 2], traj[:, 1], color='crimson', alpha=0.2, lw=1)
+                # Логика для 6-DoF баллистики снаряда
+                if model_name.startswith("6."):
+                    all_trajs = result  # Теперь тут просто список массивов
 
-                # Добавляем фиктивную линию для легенды
-                self.main_ax.plot([], [], [], color='crimson', lw=1.5, label=label)
+                    # 1. Отрисовка случайных реализаций (фоновое облако)
+                    for traj in all_trajs:
+                        self.main_ax.plot(traj[:, 0], traj[:, 2], traj[:, 1], color='dodgerblue', alpha=0.15, lw=1)
 
-                # Оформление 3D-сцены
+                        # 2. МАТЕМАТИЧЕСКИЙ РАСЧЕТ ИСТИННОЙ ПРЕДСКАЗАННОЙ ТРАЕКТОРИИ (Мат. ожидание)
+                        # Находим максимальное количество шагов среди всех полетов
+                        max_len = max(t.shape[0] for t in all_trajs)
+                        mean_trajectory = []
+
+                        for step in range(max_len):
+                            points_at_step = []
+                            for t in all_trajs:
+                                # Проверяем количество строк (шагов) в массиве через t.shape[0]
+                                if step < t.shape[0]:
+                                    points_at_step.append(t[step, :])
+                                else:
+                                    points_at_step.append(t[-1, :])
+
+                            # Считаем среднее арифметическое координат X, Y, Z на данном шаге
+                            mean_trajectory.append(np.mean(points_at_step, axis=0))
+
+                        mean_trajectory = np.array(mean_trajectory)
+
+                    # 3. СБОР ТОЧЕК ПАДЕНИЯ И РАСЧЕТ ХАРАКТЕРИСТИК РАССЕИВАНИЯ
+                    impacts = np.array([t[-1, :] for t in all_trajs])
+                    x_hits = impacts[:, 0]
+                    z_hits = impacts[:, 2]
+
+                    # Центр эллипса — это строго точка приземления усредненной траектории
+                    center_x = mean_trajectory[-1, 0]
+                    center_z = mean_trajectory[-1, 2]
+
+                    # Дисперсия (СКО) разброса вокруг центра предсказания
+                    std_x = np.std(x_hits) if len(x_hits) > 1 else 10.0
+                    std_z = np.std(z_hits) if len(z_hits) > 1 else 10.0
+
+                    # Генерация оранжевого контура эллипса (2-сигма)
+                    theta = np.linspace(0, 2 * np.pi, 100)
+                    ellipse_x = center_x + 2 * std_x * np.cos(theta)
+                    ellipse_z = center_z + 2 * std_z * np.sin(theta)
+                    ellipse_y = np.zeros_like(theta)
+
+                    # Отрисовка контура эллипса
+                    self.main_ax.plot(ellipse_x, ellipse_z, ellipse_y, color='darkorange', lw=2, ls='--',
+                                      label="Эллипс рассеивания (2σ)")
+
+                    # Отрисовка Итоговой Предсказанной Траектории метода Монте-Карло
+                    self.main_ax.plot(mean_trajectory[:, 0], mean_trajectory[:, 2], mean_trajectory[:, 1], color='red',
+                                      lw=3, label="Результат Монте-Карло (Истинное предсказание)")
+
+                    # Маркер центра падения предсказания
+                    self.main_ax.scatter([center_x], [center_z], color = 'red', s = 60, marker = 'X', zorder = 5)
+                    self.main_ax.plot([], [], [], color='dodgerblue', lw=1,
+                                      label=f"Случайные выстрелы (N={len(all_trajs)})")
+                else:
+                    # Стандартный 3D режим для модели №4
+                    self.main_ax.view_init(elev=25, azim=-60)
+                    for traj in result:
+                        self.main_ax.plot(traj[:, 0], traj[:, 2], traj[:, 1], color='crimson', alpha=0.2, lw=1)
+                    self.main_ax.plot([], [], [], color='crimson', lw=1.5, label=label)
+
                 self.main_ax.set_xlabel("Дальность X (м)")
                 self.main_ax.set_ylabel("Боковой снос Z (м)")
                 self.main_ax.set_zlabel("Высота Y (м)")
-                # Настраиваем начальный угол обзора для красивой перспективы
-                self.main_ax.view_init(elev=25, azim=-60)
-            else:
-                # Стандартный плоский 2D-режим для моделей 1, 2 и 3
-                self.main_ax = self.main_fig.add_subplot(111)
-
-                if isinstance(result, list):
-                    for traj in result:
-                        self.main_ax.plot(traj[:, 0], traj[:, 1], color='red', alpha=0.15, lw=1)
-                    self.main_ax.plot([], [], color='red', lw=1.5, label=label)
-                else:
-                    self.main_ax.plot(result, y, 'b-', lw=2, label=label)
-
-                self.main_ax.set_xlabel("Дистанция (м)")
-                self.main_ax.set_ylabel("Высота (м)")
-                self.main_ax.grid(True, ls='--', alpha=0.6)
+                self.main_ax.legend(loc='upper left', bbox_to_anchor=(0.0, -0.05))
 
             self.main_ax.set_title(f"Результат: {model_name}")
             self.main_ax.legend()
