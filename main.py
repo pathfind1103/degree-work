@@ -126,7 +126,7 @@ class TrajectoryApp(MainWindowUI):
         self.param_widgets.clear()
 
     def run_calculation(self):
-        """Выполнение расчета и отрисовка графика."""
+        """Выполнение расчета и отрисовка графика (поддерживает 2D и интерактивный 3D режимы)."""
         model_name = self.model_combo.currentText()
         if not model_name:
             return
@@ -134,16 +134,50 @@ class TrajectoryApp(MainWindowUI):
         params = {name: widget.text() for name, widget in self.param_widgets.items()}
 
         try:
-            x, y, label = self.models[model_name].calculate(params)
+            # Выполнение физического расчета.
+            # Теперь мы считываем еще и флаг is_3d, который возвращает модель
+            result, is_3d, label = self.models[model_name].calculate(params)
 
-            self.main_ax.clear()
-            self.main_ax.plot(x, y, 'b-', lw=2, label=label)
+            # Пересоздаем оси графика в зависимости от размерности (2D или 3D)
+            self.main_fig.clf()  # Полностью очищаем фигуру
+
+            if is_3d:
+                # Включаем интерактивный 3D-режим рендеринга
+                self.main_ax = self.main_fig.add_subplot(111, projection='3d')
+
+                # Рисуем пучок трехмерных линий
+                for traj in result:
+                    # traj[:, 0] - X (дальность), traj[:, 2] - Z (боковой снос), traj[:, 1] - Y (высота)
+                    self.main_ax.plot(traj[:, 0], traj[:, 2], traj[:, 1], color='crimson', alpha=0.2, lw=1)
+
+                # Добавляем фиктивную линию для легенды
+                self.main_ax.plot([], [], [], color='crimson', lw=1.5, label=label)
+
+                # Оформление 3D-сцены
+                self.main_ax.set_xlabel("Дальность X (м)")
+                self.main_ax.set_ylabel("Боковой снос Z (м)")
+                self.main_ax.set_zlabel("Высота Y (м)")
+                # Настраиваем начальный угол обзора для красивой перспективы
+                self.main_ax.view_init(elev=25, azim=-60)
+            else:
+                # Стандартный плоский 2D-режим для моделей 1, 2 и 3
+                self.main_ax = self.main_fig.add_subplot(111)
+
+                if isinstance(result, list):
+                    for traj in result:
+                        self.main_ax.plot(traj[:, 0], traj[:, 1], color='red', alpha=0.15, lw=1)
+                    self.main_ax.plot([], [], color='red', lw=1.5, label=label)
+                else:
+                    self.main_ax.plot(result, y, 'b-', lw=2, label=label)
+
+                self.main_ax.set_xlabel("Дистанция (м)")
+                self.main_ax.set_ylabel("Высота (м)")
+                self.main_ax.grid(True, ls='--', alpha=0.6)
+
             self.main_ax.set_title(f"Результат: {model_name}")
-            self.main_ax.set_xlabel("Дистанция (м)")
-            self.main_ax.set_ylabel("Высота (м)")
-            self.main_ax.grid(True, ls='--', alpha=0.6)
             self.main_ax.legend()
             self.main_canvas.draw()
+
         except Exception as err:
             self.info_display.setText(f"ОШИБКА РАСЧЕТА:\n{err}")
 
