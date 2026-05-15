@@ -1,228 +1,315 @@
 """
-Главный модуль приложения для расчета траекторий.
-Выполняет роль контроллера, связывая UI-представление с математическими моделями.
+Главный модуль приложения для расчёта траекторий (Контроллер, MVC).
+
+Форматы возврата из calculate():
+  Модели 1, 2  → (x_arr, y_arr, label),    is_3d=False  — одна 2D-кривая
+  Модель  3    → (list[ndarray(K,2)], None, label)       — 2D МК пучок
+  Модели 4, 5  → (list[ndarray(K,3)], True, label)       — 3D пучок
+  Модель  6    → (list[ndarray(K,3)], True, label)        — 6DoF + эллипсы
+
+Критические исправления по сравнению с предыдущей версией:
+  - Вместо main_fig.clf() используем безопасную замену subplot'а через
+    figure.add_subplot() с предварительным удалением старых осей.
+    clf() на Windows с Qt-бэкендом может вызвать 0xC0000409.
+  - formula_fig.savefig() теперь использует FigureCanvasAgg явно —
+    без привлечения pyplot-рендерера.
+  - Роутинг форматов результата чётко разделён по типу данных.
 """
 
 import sys
 import importlib.util
 import io
 from pathlib import Path
-import numpy as np
 
+import numpy as np
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from PyQt6.QtWidgets import QApplication, QLineEdit
 from PyQt6.QtGui import QPixmap
 
 from ui_main import MainWindowUI
+from mc_renderer import render_monte_carlo_6dof, compute_mean_trajectory_2d
 
 
 class TrajectoryApp(MainWindowUI):
     """
-    Класс-контроллер приложения.
-    Управляет жизненным циклом программы, загрузкой моделей и обработкой событий.
+    Контроллер приложения.
+
+    Управляет загрузкой моделей, обновлением UI и запуском расчётов.
     """
 
     def __init__(self):
-        """Инициализация приложения и подключение обработчиков событий."""
+        """Инициализация: подключаем сигналы и загружаем модели."""
         super().__init__()
-        self.models = {}
-        self.param_widgets = {}
+        self.models: dict = {}
+        self.param_widgets: dict = {}
 
-        # Подключение обработчиков сигналов интерфейса
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self.calc_btn.clicked.connect(self.run_calculation)
 
-        # Начальная загрузка доступных расчетных модулей
         self._load_models()
 
-    def _load_models(self):
+    # ------------------------------------------------------------------
+    # Загрузка моделей
+    # ------------------------------------------------------------------
+
+    def _load_models(self) -> None:
         """
-        Динамически загружает файлы моделей из директории 'models'.
+        Сканирует папку models/ и динамически загружает *.py модули.
+
+        Требования к модулю: get_name(), get_info(), get_params(), calculate().
+        Файлы без этих функций пропускаются с диагностикой в консоль.
         """
         models_dir = Path(__file__).parent / "models"
         models_dir.mkdir(exist_ok=True)
 
-        for file_path in models_dir.glob("*.py"):
+        for file_path in sorted(models_dir.glob("*.py")):
             if file_path.name == "__init__.py":
                 continue
-
             try:
                 spec = importlib.util.spec_from_file_location(
                     file_path.stem, file_path
                 )
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
-
                 model_name = module.get_name()
                 self.models[model_name] = module
                 self.model_combo.addItem(model_name)
             except (ImportError, AttributeError) as err:
-                print(f"Ошибка при загрузке модели {file_path.name}: {err}")
+                print(f"[Загрузчик] Пропущен {file_path.name}: {err}")
 
-    def _on_model_changed(self):
+    # ------------------------------------------------------------------
+    # Обновление UI при смене модели
+    # ------------------------------------------------------------------
+
+    def _on_model_changed(self) -> None:
         """
-        Обновляет интерфейс при выборе другой модели.
-        Использует QPixmap для стабильного отображения LaTeX без вылетов.
+        При выборе новой модели обновляет описание, формулу и параметры.
+
+        Рендеринг формулы: Figure → FigureCanvasAgg → BytesIO → QPixmap.
+        FigureCanvasAgg используется явно — без pyplot — чтобы исключить
+        краш нативного рендерера на Windows (0xC0000409).
         """
         model_name = self.model_combo.currentText()
         if not model_name or model_name not in self.models:
             return
 
-        model = self.models[model_name]
-        info = model.get_info()
+        info = self.models[model_name].get_info()
 
-        # 1. Обновление текстового описания
-        vars_info = info.get("parameters_info", {})
-        vars_text = "\n".join([f"• {k} — {v}" for k, v in vars_info.items()])
-        description = info.get("description", "Описание отсутствует.")
-        self.info_display.setText(f"{description}\n\nОбозначения:\n{vars_text}")
+        # 1. Текстовое описание + расшифровка переменных
+        vars_lines = "\n".join(
+            f"• {k} — {v}"
+            for k, v in info.get("parameters_info", {}).items()
+        )
+        self.info_display.setText(
+            f"{info.get('description', '')}\n\nОбозначения:\n{vars_lines}"
+        )
 
-        # 2. Безопасный рендеринг формулы (фикс вылетов и обрезки)
+        # 2. Рендеринг LaTeX через Agg → PNG → QPixmap.
+        #    ВАЖНО: каждый раз создаём НОВУЮ временную Figure и новый
+        #    FigureCanvasAgg. Никогда не привязываем Agg к self.formula_fig,
+        #    которая уже принадлежит Qt-layout — это вызывает 0xC0000409.
+        formula_text = info.get("formula", "")
         try:
-            self.formula_ax.clear()
-            self.formula_ax.axis('off')
+            from matplotlib.figure import Figure as _Figure
+            from matplotlib.backends.backend_agg import FigureCanvasAgg as _Agg
 
-            # Рисуем текст формулы
-            self.formula_ax.text(
+            tmp_fig = _Figure(figsize=(3.8, 1.8), facecolor='#f0f0f0')
+            tmp_canvas = _Agg(tmp_fig)
+            tmp_ax = tmp_fig.add_subplot(111)
+            tmp_ax.axis('off')
+            tmp_ax.text(
                 0.5, 0.5,
-                info.get("formula", ""),
-                fontsize=13,
+                formula_text,
+                fontsize=11,
                 ha='center',
                 va='center',
-                math_fontfamily='cm'
+                math_fontfamily='cm',
+                transform=tmp_ax.transAxes,
             )
-
-            # Вместо tight_layout используем bbox_inches при сохранении
             buf = io.BytesIO()
-            self.formula_fig.savefig(
+            tmp_canvas.print_figure(
                 buf,
                 format='png',
-                dpi=110,
+                dpi=96,
                 facecolor='#f0f0f0',
-                bbox_inches='tight', # Убирает пустые поля вокруг формулы
-                pad_inches=0.1
+                bbox_inches='tight',
+                pad_inches=0.12,
             )
             buf.seek(0)
-
             pixmap = QPixmap()
             pixmap.loadFromData(buf.getvalue())
-            self.formula_label.setPixmap(pixmap)
             buf.close()
-        except Exception as e:
-            self.formula_label.setText("Ошибка рендеринга формулы")
-            print(f"Render error: {e}")
+            if not pixmap.isNull():
+                self.formula_label.setPixmap(pixmap)
+                self.formula_label.setText("")
+            else:
+                self.formula_label.setText(formula_text)
+        except Exception as exc:
+            # Fallback: показываем сырой текст — лучше, чем краш
+            self.formula_label.setPixmap(QPixmap())
+            self.formula_label.setText(formula_text)
+            print(f"[Формула] {exc}")
 
-        # 3. Пересоздание динамической формы параметров
+        # 3. Пересборка формы параметров
         self._clear_params()
-        for p_name, p_val in model.get_params().items():
+        for p_name, p_val in self.models[model_name].get_params().items():
             edit = QLineEdit(str(p_val))
             self.params_layout.addRow(p_name, edit)
             self.param_widgets[p_name] = edit
 
-    def _clear_params(self):
-        """Удаляет все текущие виджеты параметров из формы."""
+    def _clear_params(self) -> None:
+        """Удаляет все виджеты параметров из формы."""
         while self.params_layout.count():
             child = self.params_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
         self.param_widgets.clear()
 
-    def run_calculation(self):
-        """Выполнение расчета и отрисовка графика (поддерживает 2D и интерактивный 3D режимы)."""
+    # ------------------------------------------------------------------
+    # Запуск расчёта
+    # ------------------------------------------------------------------
+
+    def run_calculation(self) -> None:
+        """
+        Читает параметры из UI, вызывает calculate() активной модели,
+        определяет формат результата и делегирует рендеринг.
+
+        Безопасная замена осей: вместо clf() используем
+        fig.clear() + add_subplot(), что не разрушает связь canvas↔figure.
+        """
         model_name = self.model_combo.currentText()
         if not model_name:
             return
 
-        params = {name: widget.text() for name, widget in self.param_widgets.items()}
+        params = {
+            name: widget.text()
+            for name, widget in self.param_widgets.items()
+        }
 
         try:
-            # Выполнение физического расчета.
-            # Теперь мы считываем еще и флаг is_3d, который возвращает модель
-            result, is_3d, label = self.models[model_name].calculate(params)
-
-            # Пересоздаем оси графика в зависимости от размерности (2D или 3D)
-            self.main_fig.clf()  # Полностью очищаем фигуру
-
-            if is_3d:
-                self.main_fig.clf()
-                self.main_ax = self.main_fig.add_subplot(111, projection='3d')
-
-                # Логика для 6-DoF баллистики снаряда
-                if model_name.startswith("6."):
-                    all_trajs = result  # Теперь тут просто список массивов
-
-                    # 1. Отрисовка случайных реализаций (фоновое облако)
-                    for traj in all_trajs:
-                        self.main_ax.plot(traj[:, 0], traj[:, 2], traj[:, 1], color='dodgerblue', alpha=0.15, lw=1)
-
-                        # 2. МАТЕМАТИЧЕСКИЙ РАСЧЕТ ИСТИННОЙ ПРЕДСКАЗАННОЙ ТРАЕКТОРИИ (Мат. ожидание)
-                        # Находим максимальное количество шагов среди всех полетов
-                        max_len = max(t.shape[0] for t in all_trajs)
-                        mean_trajectory = []
-
-                        for step in range(max_len):
-                            points_at_step = []
-                            for t in all_trajs:
-                                # Проверяем количество строк (шагов) в массиве через t.shape[0]
-                                if step < t.shape[0]:
-                                    points_at_step.append(t[step, :])
-                                else:
-                                    points_at_step.append(t[-1, :])
-
-                            # Считаем среднее арифметическое координат X, Y, Z на данном шаге
-                            mean_trajectory.append(np.mean(points_at_step, axis=0))
-
-                        mean_trajectory = np.array(mean_trajectory)
-
-                    # 3. СБОР ТОЧЕК ПАДЕНИЯ И РАСЧЕТ ХАРАКТЕРИСТИК РАССЕИВАНИЯ
-                    impacts = np.array([t[-1, :] for t in all_trajs])
-                    x_hits = impacts[:, 0]
-                    z_hits = impacts[:, 2]
-
-                    # Центр эллипса — это строго точка приземления усредненной траектории
-                    center_x = mean_trajectory[-1, 0]
-                    center_z = mean_trajectory[-1, 2]
-
-                    # Дисперсия (СКО) разброса вокруг центра предсказания
-                    std_x = np.std(x_hits) if len(x_hits) > 1 else 10.0
-                    std_z = np.std(z_hits) if len(z_hits) > 1 else 10.0
-
-                    # Генерация оранжевого контура эллипса (2-сигма)
-                    theta = np.linspace(0, 2 * np.pi, 100)
-                    ellipse_x = center_x + 2 * std_x * np.cos(theta)
-                    ellipse_z = center_z + 2 * std_z * np.sin(theta)
-                    ellipse_y = np.zeros_like(theta)
-
-                    # Отрисовка контура эллипса
-                    self.main_ax.plot(ellipse_x, ellipse_z, ellipse_y, color='darkorange', lw=2, ls='--',
-                                      label="Эллипс рассеивания (2σ)")
-
-                    # Отрисовка Итоговой Предсказанной Траектории метода Монте-Карло
-                    self.main_ax.plot(mean_trajectory[:, 0], mean_trajectory[:, 2], mean_trajectory[:, 1], color='red',
-                                      lw=3, label="Результат Монте-Карло (Истинное предсказание)")
-
-                    # Маркер центра падения предсказания
-                    self.main_ax.scatter([center_x], [center_z], color = 'red', s = 60, marker = 'X', zorder = 5)
-                    self.main_ax.plot([], [], [], color='dodgerblue', lw=1,
-                                      label=f"Случайные выстрелы (N={len(all_trajs)})")
-                else:
-                    # Стандартный 3D режим для модели №4
-                    self.main_ax.view_init(elev=25, azim=-60)
-                    for traj in result:
-                        self.main_ax.plot(traj[:, 0], traj[:, 2], traj[:, 1], color='crimson', alpha=0.2, lw=1)
-                    self.main_ax.plot([], [], [], color='crimson', lw=1.5, label=label)
-
-                self.main_ax.set_xlabel("Дальность X (м)")
-                self.main_ax.set_ylabel("Боковой снос Z (м)")
-                self.main_ax.set_zlabel("Высота Y (м)")
-                self.main_ax.legend(loc='upper left', bbox_to_anchor=(0.0, -0.05))
-
-            self.main_ax.set_title(f"Результат: {model_name}")
-            self.main_ax.legend()
-            self.main_canvas.draw()
-
+            raw = self.models[model_name].calculate(params)
         except Exception as err:
-            self.info_display.setText(f"ОШИБКА РАСЧЕТА:\n{err}")
+            self.info_display.setText(f"ОШИБКА РАСЧЁТА:\n{err}")
+            return
 
+        # Определяем формат ответа модели:
+        #   Модели 1, 2 → (x_arr, y_arr, label_str)         — 3 элемента, нет флага
+        #   Модели 3..6 → (data, is_3d_flag, label_str)      — 3 элемента, флаг bool/None
+        # Различаем по типу второго элемента: numpy array → 2D-кривая,
+        # bool/None → МК или 3D режим.
+        import numpy as np
+        if len(raw) == 3 and isinstance(raw[1], np.ndarray):
+            # Формат модулей 1 и 2: (x, y, label)
+            result = (raw[0], raw[1])
+            is_3d = False
+            label = raw[2]
+        else:
+            result, is_3d, label = raw
+
+        # Безопасная замена осей на Windows:
+        # НЕ используем figure.clear() / figure.clf() — они разрушают
+        # внутреннюю связь Figure<->FigureCanvasQTAgg и вызывают 0xC0000409.
+        # Вместо этого удаляем каждую ось через ax.remove() и создаём новую.
+        for ax in self.main_fig.axes[:]:
+            ax.remove()
+
+        if is_3d:
+            self.main_ax = self.main_fig.add_subplot(111, projection='3d')
+            if model_name.startswith("6."):
+                self._render_6dof_mc(result)
+            else:
+                self._render_3d_bundle(result, label)
+        else:
+            self.main_ax = self.main_fig.add_subplot(111)
+            if isinstance(result, list):
+                # Модель 3: 2D МК — список массивов (K_i, 2)
+                self._render_2d_mc(result, label)
+            else:
+                # Модели 1, 2: одна кривая — кортеж (x_arr, y_arr)
+                self._render_2d_single(result, label)
+
+        self.main_ax.set_title(f"Результат: {model_name}", pad=10)
+        self.main_canvas.draw()
+
+    # ------------------------------------------------------------------
+    # Рендереры (приватные)
+    # ------------------------------------------------------------------
+
+    def _render_2d_single(self, result: tuple, label: str) -> None:
+        """
+        Одна 2D-траектория (модели 1 и 2).
+
+        Args:
+            result: Кортеж (x_arr, y_arr) — numpy-массивы координат.
+            label:  Строка для легенды.
+        """
+        x_arr, y_arr = result
+        self.main_ax.plot(x_arr, y_arr, lw=2, color='royalblue', label=label)
+        self.main_ax.set_xlabel("Дальность X, м")
+        self.main_ax.set_ylabel("Высота Y, м")
+        self.main_ax.legend()
+        self.main_ax.grid(True, alpha=0.4)
+
+    def _render_2d_mc(self, result: list, label: str) -> None:
+        """
+        Пучок 2D-траекторий Монте-Карло + средняя линия (модель 3).
+
+        Args:
+            result: Список массивов (K_i, 2).
+            label:  Строка для легенды.
+        """
+        for traj in result:
+            self.main_ax.plot(
+                traj[:, 0], traj[:, 1],
+                color='steelblue', alpha=0.25, lw=0.8,
+            )
+        mean = compute_mean_trajectory_2d(result)
+        self.main_ax.plot(
+            mean[:, 0], mean[:, 1],
+            color='red', lw=2,
+            label=f"Среднее ({label})",
+        )
+        self.main_ax.set_xlabel("Дальность X, м")
+        self.main_ax.set_ylabel("Высота Y, м")
+        self.main_ax.legend()
+        self.main_ax.grid(True, alpha=0.4)
+
+    def _render_3d_bundle(self, result: list, label: str) -> None:
+        """
+        3D-пучок траекторий (модели 4 и 5).
+
+        Args:
+            result: Список массивов (K_i, 3), столбцы: x, y, z.
+            label:  Строка для легенды.
+        """
+        self.main_ax.view_init(elev=25, azim=-60)
+        for traj in result:
+            self.main_ax.plot(
+                traj[:, 0], traj[:, 2], traj[:, 1],
+                color='crimson', alpha=0.25, lw=0.8,
+            )
+        self.main_ax.plot([], [], [], color='crimson', lw=1.5, label=label)
+        self.main_ax.set_xlabel("Дальность X, м")
+        self.main_ax.set_ylabel("Боковой снос Z, м")
+        self.main_ax.set_zlabel("Высота Y, м")
+        self.main_ax.legend(fontsize=8)
+
+    def _render_6dof_mc(self, result: list) -> None:
+        """
+        6-DoF Монте-Карло: облако, средняя траектория, эллипсы 1σ/2σ/3σ.
+
+        Делегирует в mc_renderer.render_monte_carlo_6dof.
+
+        Args:
+            result: Список массивов (K_i, 3).
+        """
+        render_monte_carlo_6dof(self.main_ax, result)
+        self.main_ax.legend(loc='upper left', fontsize=7)
+
+
+# ---------------------------------------------------------------------------
+# Точка входа
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
