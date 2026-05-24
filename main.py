@@ -19,11 +19,12 @@
 import sys
 import importlib.util
 import io
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-from PyQt6.QtWidgets import QApplication, QLineEdit
+from PyQt6.QtWidgets import QApplication, QLineEdit, QMessageBox
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtCore import QTimer
 
@@ -34,6 +35,13 @@ from mc_renderer import (
     compute_mean_trajectory_2d,
     compute_impact_ellipse,
 )
+
+
+VORTEX_ONLY_PARAMS = {
+    "Vortex_X_Shift",
+    "Vortex_Z_Shift",
+    "Vortex_Strength_Factor",
+}
 
 
 DEMO_SCENARIO_PRESETS = {
@@ -48,6 +56,9 @@ DEMO_SCENARIO_PRESETS = {
         "scenario": "calm",
         "Wind_Strength": "4.0",
         "Turbulence": "0.5",
+        "Vortex_X_Shift": "0.0",
+        "Vortex_Z_Shift": "0.0",
+        "Vortex_Strength_Factor": "1.0",
         "m": "0.85",
         "D": "0.04",
         "L": "0.18",
@@ -64,6 +75,9 @@ DEMO_SCENARIO_PRESETS = {
         "scenario": "shear",
         "Wind_Strength": "22.0",
         "Turbulence": "1.5",
+        "Vortex_X_Shift": "0.0",
+        "Vortex_Z_Shift": "0.0",
+        "Vortex_Strength_Factor": "1.0",
         "m": "0.85",
         "D": "0.04",
         "L": "0.18",
@@ -80,6 +94,9 @@ DEMO_SCENARIO_PRESETS = {
         "scenario": "turbulent",
         "Wind_Strength": "18.0",
         "Turbulence": "7.0",
+        "Vortex_X_Shift": "0.0",
+        "Vortex_Z_Shift": "0.0",
+        "Vortex_Strength_Factor": "1.0",
         "m": "0.85",
         "D": "0.04",
         "L": "0.18",
@@ -96,6 +113,9 @@ DEMO_SCENARIO_PRESETS = {
         "scenario": "storm",
         "Wind_Strength": "35.0",
         "Turbulence": "5.0",
+        "Vortex_X_Shift": "0.0",
+        "Vortex_Z_Shift": "0.0",
+        "Vortex_Strength_Factor": "1.0",
         "m": "0.85",
         "D": "0.04",
         "L": "0.18",
@@ -112,6 +132,9 @@ DEMO_SCENARIO_PRESETS = {
         "scenario": "vortex",
         "Wind_Strength": "30.0",
         "Turbulence": "3.0",
+        "Vortex_X_Shift": "0.0",
+        "Vortex_Z_Shift": "0.0",
+        "Vortex_Strength_Factor": "1.0",
         "m": "0.85",
         "D": "0.04",
         "L": "0.18",
@@ -128,6 +151,9 @@ DEMO_SCENARIO_PRESETS = {
         "scenario": "calm",
         "Wind_Strength": "3.0",
         "Turbulence": "0.5",
+        "Vortex_X_Shift": "0.0",
+        "Vortex_Z_Shift": "0.0",
+        "Vortex_Strength_Factor": "1.0",
         "m": "0.85",
         "D": "0.04",
         "L": "0.18",
@@ -144,6 +170,9 @@ DEMO_SCENARIO_PRESETS = {
         "scenario": "turbulent",
         "Wind_Strength": "20.0",
         "Turbulence": "5.0",
+        "Vortex_X_Shift": "0.0",
+        "Vortex_Z_Shift": "0.0",
+        "Vortex_Strength_Factor": "1.0",
         "m": "0.50",
         "D": "0.04",
         "L": "0.18",
@@ -160,6 +189,9 @@ DEMO_SCENARIO_PRESETS = {
         "scenario": "turbulent",
         "Wind_Strength": "20.0",
         "Turbulence": "5.0",
+        "Vortex_X_Shift": "0.0",
+        "Vortex_Z_Shift": "0.0",
+        "Vortex_Strength_Factor": "1.0",
         "m": "2.00",
         "D": "0.04",
         "L": "0.18",
@@ -180,6 +212,7 @@ class TrajectoryApp(MainWindowUI):
         super().__init__()
         self.models: dict = {}
         self.param_widgets: dict = {}
+        self.param_labels: dict = {}
         self.animation_data: dict | None = None
         self.animation_frame: int = 0
         self._resume_animation_after_drag = False
@@ -193,10 +226,14 @@ class TrajectoryApp(MainWindowUI):
         self.anim_play_btn.clicked.connect(self._toggle_animation)
         self.anim_prev_btn.clicked.connect(self._previous_animation_frame)
         self.anim_next_btn.clicked.connect(self._next_animation_frame)
+        self.anim_export_gif_btn.clicked.connect(self._export_animation_gif)
         self.anim_slider.valueChanged.connect(self._on_animation_slider_changed)
         self.anim_run_combo.currentIndexChanged.connect(self._on_animation_run_changed)
         self.anim_zoom_slider.valueChanged.connect(self._on_animation_zoom_changed)
         self.anim_density_combo.currentIndexChanged.connect(self._on_animation_density_changed)
+        self.anim_camera_combo.currentIndexChanged.connect(self._on_animation_view_changed)
+        self.anim_region_combo.currentIndexChanged.connect(self._on_animation_view_changed)
+        self.anim_view_combo.currentIndexChanged.connect(self._on_animation_view_changed)
         self.main_canvas.mpl_connect("button_press_event", self._on_canvas_mouse_press)
         self.main_canvas.mpl_connect("button_release_event", self._on_canvas_mouse_release)
 
@@ -331,8 +368,12 @@ class TrajectoryApp(MainWindowUI):
             edit = QLineEdit(str(p_val))
             self.params_layout.addRow(p_name, edit)
             self.param_widgets[p_name] = edit
+            self.param_labels[p_name] = self.params_layout.labelForField(edit)
+            if p_name == "scenario":
+                edit.textChanged.connect(self._update_vortex_param_visibility)
 
         self._configure_scenario_presets(model_name)
+        self._update_vortex_param_visibility()
 
     def _clear_params(self) -> None:
         """Удаляет все виджеты параметров из формы."""
@@ -341,6 +382,7 @@ class TrajectoryApp(MainWindowUI):
             if child.widget():
                 child.widget().deleteLater()
         self.param_widgets.clear()
+        self.param_labels.clear()
 
     def _configure_scenario_presets(self, model_name: str) -> None:
         """Показывает список демонстрационных сценариев только для модели 8."""
@@ -367,6 +409,21 @@ class TrajectoryApp(MainWindowUI):
             widget = self.param_widgets.get(name)
             if widget is not None:
                 widget.setText(str(value))
+        self._update_vortex_param_visibility()
+
+    def _update_vortex_param_visibility(self) -> None:
+        """Показывает параметры управления вихрем только для scenario=vortex."""
+        scenario_widget = self.param_widgets.get("scenario")
+        scenario = scenario_widget.text().strip().lower() if scenario_widget else ""
+        show_vortex_params = scenario in {"vortex", "вихрь"}
+
+        for name in VORTEX_ONLY_PARAMS:
+            widget = self.param_widgets.get(name)
+            label = self.param_labels.get(name)
+            if widget is not None:
+                widget.setVisible(show_vortex_params)
+            if label is not None:
+                label.setVisible(show_vortex_params)
 
     # ------------------------------------------------------------------
     # Запуск расчёта
@@ -574,8 +631,12 @@ class TrajectoryApp(MainWindowUI):
         self.anim_zoom_slider.setValue(35)
         self.anim_zoom_label.setText("Zoom 35%")
         self.anim_density_combo.setCurrentText("80")
+        self.anim_camera_combo.setCurrentText("Следить за снарядом")
+        self.anim_region_combo.setCurrentText("Куб средний")
+        self.anim_view_combo.setCurrentText("3D поле")
 
         self.animation_panel.setVisible(True)
+        self.anim_export_gif_btn.setEnabled(True)
         self.anim_play_btn.setText("Пуск")
         self._set_animation_replay_enabled(False)
         self._render_dynamic_wind_summary()
@@ -606,12 +667,16 @@ class TrajectoryApp(MainWindowUI):
             color="steelblue", s=14, alpha=0.55, label="Точки падения",
         )
 
+        ellipse_limit_points = []
         for n_sig, color, ls, lw, pct in [
             (1, "limegreen", "-", 1.8, "68%"),
             (2, "darkorange", "--", 2.0, "95%"),
             (3, "crimson", ":", 2.2, "99.7%"),
         ]:
             ex, ez, *_ = compute_impact_ellipse(trajectories, n_sig)
+            ellipse_limit_points.append(
+                np.column_stack([ex, np.zeros_like(ex), ez])
+            )
             self.main_ax.plot(
                 ex, ez, np.zeros_like(ex),
                 color=color, lw=lw, ls=ls,
@@ -631,7 +696,15 @@ class TrajectoryApp(MainWindowUI):
             label=f"Центр σ_x={sx:.1f}м σ_z={sz:.1f}м",
         )
 
-        xlim, ylim, zlim = self._set_dynamic_axes_limits(trajectories)
+        summary_limit_points = np.vstack([
+            impacts,
+            np.array([[cx, 0.0, cz]], dtype=float),
+            *ellipse_limit_points,
+        ])
+        xlim, ylim, zlim = self._set_dynamic_axes_limits(
+            trajectories,
+            extra_points=summary_limit_points,
+        )
         self._draw_wind_layers(xlim, ylim, zlim, annotate=True)
         self.main_ax.set_xlabel("Дальность X, м")
         self.main_ax.set_ylabel("Боковой снос Z, м")
@@ -695,12 +768,22 @@ class TrajectoryApp(MainWindowUI):
 
         xlim, ylim, zlim = self._set_dynamic_axes_limits([traj], focus=current_pos)
         self._draw_wind_layers(xlim, ylim, zlim, annotate=False)
-        wind_points, grid_step = self._build_wind_display_grid(xlim, ylim, zlim)
+        view_mode = self.anim_view_combo.currentText()
+        wind_xylim, wind_ylim, wind_zlim = self._wind_region_limits(xlim, ylim, zlim, current_pos)
+        if view_mode == "Вертикальный срез":
+            self._draw_vertical_slice_plane(wind_xylim, wind_zlim, float(current_pos[2]))
+            wind_points, grid_step = self._build_wind_slice_grid(
+                wind_xylim, wind_zlim, float(current_pos[2])
+            )
+        else:
+            wind_points, grid_step = self._build_wind_display_grid(
+                wind_xylim, wind_ylim, wind_zlim
+            )
         wind_vectors = wind_field.sample_points(t_curr, wind_points)
 
         speed = np.linalg.norm(wind_vectors, axis=1)
         max_speed = max(float(np.max(speed)), 1e-9)
-        colors = self._wind_colors(speed / max_speed)
+        colors = self._wind_colors(speed)
         scaled_vectors = self._scale_wind_vectors(wind_vectors, grid_step)
         self.main_ax.quiver(
             wind_points[:, 0], wind_points[:, 2], wind_points[:, 1],
@@ -712,20 +795,56 @@ class TrajectoryApp(MainWindowUI):
             linewidths=1.6,
             arrow_length_ratio=0.38,
         )
+        local_arrow = self._scale_local_wind(local_wind, grid_step)
+        local_end = (
+            current_pos[0] + local_arrow[0],
+            current_pos[2] + local_arrow[1],
+            current_pos[1] + local_arrow[2],
+        )
         self.main_ax.quiver(
             current_pos[0], current_pos[2], current_pos[1],
-            *self._scale_local_wind(local_wind, grid_step),
+            *local_arrow,
+            length=1.0,
+            normalize=False,
+            color="black",
+            alpha=1.0,
+            linewidths=7.0,
+            arrow_length_ratio=0.46,
+            zorder=102,
+        )
+        self.main_ax.quiver(
+            current_pos[0], current_pos[2], current_pos[1],
+            *local_arrow,
             length=1.0,
             normalize=False,
             color="limegreen",
-            alpha=0.95,
-            linewidths=4.0,
-            arrow_length_ratio=0.42,
+            alpha=1.0,
+            linewidths=4.2,
+            arrow_length_ratio=0.46,
+            zorder=103,
+        )
+        self.main_ax.scatter(
+            [local_end[0]], [local_end[1]], [local_end[2]],
+            color="black", s=62, marker=">", alpha=1.0, zorder=104,
+        )
+        self.main_ax.scatter(
+            [local_end[0]], [local_end[1]], [local_end[2]],
+            color="limegreen", s=38, marker=">", alpha=1.0, zorder=105,
+        )
+        self.main_ax.text(
+            local_end[0], local_end[1], local_end[2],
+            " W",
+            color="black",
+            fontsize=10,
+            weight="bold",
+            zorder=106,
         )
         self.main_ax.plot([], [], [], color="limegreen", lw=2.6,
-                          label=f"Ветер у снаряда |W|={np.linalg.norm(local_wind):.1f} м/с")
+                          label="Локальный ветер у снаряда")
         self.main_ax.plot([], [], [], color="white", alpha=0.0,
-                          label=f"Сетка ветра: {len(wind_points)} стрелок, |W|max={max_speed:.1f} м/с")
+                          label=f"Ветровая сетка: {len(wind_points)} стрелок, |W|max={max_speed:.1f} м/с")
+        self.main_ax.plot([], [], [], color="white", alpha=0.0,
+                          label="Цвет: синий <5, зелёный 5-15, оранжевый 15-30, красный >30 м/с")
         self.main_ax.set_xlabel("Дальность X, м")
         self.main_ax.set_ylabel("Боковой снос Z, м")
         self.main_ax.set_zlabel("Высота Y, м")
@@ -735,6 +854,14 @@ class TrajectoryApp(MainWindowUI):
             pad=10,
         )
         self.main_ax.legend(loc="upper left", fontsize=7)
+        self._draw_frame_mini_panel(
+            current_pos,
+            local_wind,
+            t_curr,
+            view_mode,
+            self.anim_camera_combo.currentText(),
+            self.anim_region_combo.currentText(),
+        )
 
         self.anim_time_label.setText(f"t = {t_curr:.2f} c")
         if self.anim_slider.value() != frame_index:
@@ -744,9 +871,16 @@ class TrajectoryApp(MainWindowUI):
 
         self.main_canvas.draw_idle()
 
-    def _set_dynamic_axes_limits(self, trajectories: list, focus: np.ndarray | None = None) -> tuple:
+    def _set_dynamic_axes_limits(
+        self,
+        trajectories: list,
+        focus: np.ndarray | None = None,
+        extra_points: np.ndarray | None = None,
+    ) -> tuple:
         """Ставит устойчивые границы 3D-осей для итоговой модели."""
         points = np.vstack(trajectories)
+        if extra_points is not None and len(extra_points) > 0:
+            points = np.vstack([points, extra_points])
         x_min = min(0.0, float(np.min(points[:, 0])))
         x_max = max(float(np.max(points[:, 0])) * 1.08, 1.0)
         y_max = max(float(np.max(points[:, 1])) * 1.18, 1.0)
@@ -757,8 +891,25 @@ class TrajectoryApp(MainWindowUI):
         zlim = (0.0, y_max)
 
         if focus is not None:
+            region_mode = self.anim_region_combo.currentText()
+            camera_mode = self.anim_camera_combo.currentText()
             zoom = self.anim_zoom_slider.value() / 100.0
-            if zoom > 0.0:
+            if camera_mode == "Вся траектория":
+                pass
+            elif region_mode != "Вся область":
+                size_factor = self._zoom_size_factor()
+                x_half, height_half, side_half = self._local_region_halves(region_mode)
+                x_half *= size_factor
+                height_half *= size_factor
+                side_half *= size_factor
+                cx = float(focus[0])
+                cy = float(focus[1])
+                cz = float(focus[2])
+
+                xlim = (cx - x_half, cx + x_half)
+                ylim = (cz - side_half, cz + side_half)
+                zlim = (cy - height_half, cy + height_half)
+            elif camera_mode == "Следить":
                 cx = float(focus[0])
                 cy = float(focus[1])
                 cz = float(focus[2])
@@ -778,6 +929,55 @@ class TrajectoryApp(MainWindowUI):
         self.main_ax.set_ylim(*ylim)
         self.main_ax.set_zlim(*zlim)
         return xlim, ylim, zlim
+
+    @staticmethod
+    def _local_region_halves(region_mode: str) -> tuple:
+        """Размеры локального окна вокруг снаряда: X, высота, боковой снос."""
+        sizes = {
+            "Куб близкий": (160.0, 90.0, 90.0),
+            "Куб средний": (360.0, 180.0, 180.0),
+            "Куб дальний": (750.0, 350.0, 350.0),
+        }
+        return sizes.get(region_mode, sizes["Куб средний"])
+
+    def _zoom_size_factor(self) -> float:
+        """Плавная поправка размера окна: 35% примерно соответствует базовому кубу."""
+        zoom = self.anim_zoom_slider.value()
+        return float(np.clip(1.35 - 0.01 * zoom, 0.35, 1.35))
+
+    def _wind_region_limits(
+        self,
+        xlim: tuple,
+        ylim: tuple,
+        zlim: tuple,
+        focus: np.ndarray,
+    ) -> tuple:
+        """Возвращает область, внутри которой размещаются стрелки ветра."""
+        region_mode = self.anim_region_combo.currentText()
+        if region_mode == "Вся область":
+            return xlim, ylim, zlim
+
+        size_factor = self._zoom_size_factor()
+        x_half, height_half, side_half = self._local_region_halves(region_mode)
+        x_half *= size_factor
+        height_half *= size_factor
+        side_half *= size_factor
+
+        rx = self._clip_interval(float(focus[0]) - x_half, float(focus[0]) + x_half, xlim)
+        ry = self._clip_interval(float(focus[2]) - side_half, float(focus[2]) + side_half, ylim)
+        rz = self._clip_interval(float(focus[1]) - height_half, float(focus[1]) + height_half, zlim)
+        return rx, ry, rz
+
+    @staticmethod
+    def _clip_interval(low: float, high: float, bounds: tuple) -> tuple:
+        """Обрезает интервал по границам оси, сохраняя ненулевую ширину."""
+        clipped_low = max(float(bounds[0]), float(low))
+        clipped_high = min(float(bounds[1]), float(high))
+        if clipped_high - clipped_low < 1e-6:
+            center = 0.5 * (float(bounds[0]) + float(bounds[1]))
+            half = max(0.5 * (float(bounds[1]) - float(bounds[0])), 1.0)
+            return center - half, center + half
+        return clipped_low, clipped_high
 
     def _draw_wind_layers(
         self,
@@ -833,10 +1033,12 @@ class TrajectoryApp(MainWindowUI):
         """Строит регулярную сетку стрелок в центрах ячеек видимого куба."""
         target = int(self.anim_density_combo.currentText())
         shapes = {
-            40: (4, 5, 2),
-            80: (4, 5, 4),
-            160: (5, 8, 4),
-            256: (8, 8, 4),
+            40: (4, 4, 3),
+            80: (5, 5, 4),
+            160: (6, 6, 5),
+            256: (8, 7, 6),
+            384: (8, 8, 7),
+            512: (9, 8, 8),
         }
         nx, ny, nz = shapes.get(target, (5, 4, 4))
         x_vals = self._cell_centers(xlim[0], xlim[1], nx)
@@ -844,12 +1046,50 @@ class TrajectoryApp(MainWindowUI):
         y_vals = self._cell_centers(zlim[0], zlim[1], ny)
         xx, yy, zz = np.meshgrid(x_vals, y_vals, z_vals, indexing="ij")
         points = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
+        points = points[points[:, 1] >= 0.0]
 
         dx = (xlim[1] - xlim[0]) / max(nx, 1)
         dy = (zlim[1] - zlim[0]) / max(ny, 1)
         dz = (ylim[1] - ylim[0]) / max(nz, 1)
         grid_step = max(min(dx, dy, dz), 1.0)
         return points, grid_step
+
+    def _build_wind_slice_grid(self, xlim: tuple, zlim: tuple, side_z: float) -> tuple:
+        """Строит сетку стрелок на вертикальном X-Y срезе через снаряд."""
+        target = int(self.anim_density_combo.currentText())
+        shapes = {
+            40: (8, 5),
+            80: (10, 8),
+            160: (16, 10),
+            256: (16, 16),
+            384: (24, 16),
+            512: (32, 16),
+        }
+        nx, ny = shapes.get(target, (10, 8))
+        x_vals = self._cell_centers(xlim[0], xlim[1], nx)
+        y_vals = self._cell_centers(zlim[0], zlim[1], ny)
+        xx, yy = np.meshgrid(x_vals, y_vals, indexing="ij")
+        zz = np.full_like(xx, side_z)
+        points = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
+        points = points[points[:, 1] >= 0.0]
+
+        dx = (xlim[1] - xlim[0]) / max(nx, 1)
+        dy = (zlim[1] - zlim[0]) / max(ny, 1)
+        return points, max(min(dx, dy), 1.0)
+
+    def _draw_vertical_slice_plane(self, xlim: tuple, zlim: tuple, side_z: float) -> None:
+        """Показывает полупрозрачную плоскость вертикального среза."""
+        x = np.array([xlim[0], xlim[1]])
+        y = np.array([zlim[0], zlim[1]])
+        xx, yy = np.meshgrid(x, y)
+        zz = np.full_like(xx, side_z)
+        self.main_ax.plot_surface(
+            xx, zz, yy,
+            color=(0.15, 0.45, 0.95, 0.08),
+            shade=False,
+            linewidth=0,
+            antialiased=False,
+        )
 
     @staticmethod
     def _cell_centers(low: float, high: float, count: int) -> np.ndarray:
@@ -876,20 +1116,80 @@ class TrajectoryApp(MainWindowUI):
         return float(scaled[0]), float(scaled[2]), float(scaled[1])
 
     @staticmethod
-    def _wind_colors(values: np.ndarray) -> list:
-        """Цвета стрелок ветра: от холодного голубого к теплому оранжевому."""
+    def _wind_colors(speeds: np.ndarray) -> list:
+        """Абсолютная шкала цвета ветра: м/с, а не относительный максимум кадра."""
         colors = []
-        for value in np.clip(values, 0.0, 1.0):
-            r = 0.10 + 0.90 * float(value)
-            g = 0.55 + 0.25 * (1.0 - abs(float(value) - 0.55) / 0.55)
-            b = 1.00 - 0.85 * float(value)
-            colors.append((r, g, b, 0.82))
+        stops = [
+            (0.0, np.array([0.18, 0.62, 1.00])),
+            (5.0, np.array([0.22, 0.78, 0.84])),
+            (15.0, np.array([0.36, 0.74, 0.32])),
+            (30.0, np.array([1.00, 0.62, 0.12])),
+            (50.0, np.array([0.92, 0.12, 0.10])),
+        ]
+        for speed in np.clip(speeds, 0.0, 50.0):
+            for (s0, c0), (s1, c1) in zip(stops[:-1], stops[1:]):
+                if speed <= s1:
+                    frac = (float(speed) - s0) / max(s1 - s0, 1e-9)
+                    rgb = c0 * (1.0 - frac) + c1 * frac
+                    colors.append((float(rgb[0]), float(rgb[1]), float(rgb[2]), 0.84))
+                    break
         return colors
+
+    @staticmethod
+    def _local_wind_label(vector: np.ndarray) -> str:
+        """Короткая инженерная подпись локального ветра у снаряда."""
+        speed = float(np.linalg.norm(vector))
+        return (
+            f"Ветер у снаряда |W|={speed:.1f} м/с "
+            f"(Wx={vector[0]:+.1f}, Wy={vector[1]:+.1f}, Wz={vector[2]:+.1f})"
+        )
+
+    def _draw_frame_mini_panel(
+        self,
+        position: np.ndarray,
+        wind: np.ndarray,
+        time_s: float,
+        view_mode: str,
+        camera_mode: str,
+        region_mode: str,
+    ) -> None:
+        """Показывает численные параметры текущего кадра поверх графика."""
+        speed = float(np.linalg.norm(wind))
+        panel = (
+            "КАДР РАСЧЁТА\n"
+            f"t: {time_s:.2f} c\n"
+            f"Снаряд: X={position[0]:.1f} м, Y={position[1]:.1f} м, Z={position[2]:.1f} м\n"
+            f"Локальный ветер: |W|={speed:.1f} м/с\n"
+            f"  Wx дальность: {wind[0]:+.1f} м/с\n"
+            f"  Wy вертикаль: {wind[1]:+.1f} м/с\n"
+            f"  Wz боковой:  {wind[2]:+.1f} м/с\n"
+            f"Камера: {camera_mode}\n"
+            f"Стрелки: {region_mode}, {view_mode}"
+        )
+        self.main_ax.text2D(
+            0.985, 0.985,
+            panel,
+            transform=self.main_ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=8,
+            family="monospace",
+            color=(0.05, 0.05, 0.05),
+            bbox={
+                "boxstyle": "round,pad=0.35",
+                "facecolor": (1.0, 1.0, 1.0, 0.86),
+                "edgecolor": (0.65, 0.65, 0.65, 0.70),
+                "linewidth": 0.8,
+            },
+        )
 
     def _set_animation_replay_enabled(self, enabled: bool) -> None:
         """Включает управление записью только для выбранного пуска."""
         self.anim_zoom_slider.setEnabled(enabled)
         self.anim_density_combo.setEnabled(enabled)
+        self.anim_camera_combo.setEnabled(enabled)
+        self.anim_region_combo.setEnabled(enabled)
+        self.anim_view_combo.setEnabled(enabled)
         self.anim_prev_btn.setEnabled(enabled)
         self.anim_play_btn.setEnabled(enabled)
         self.anim_next_btn.setEnabled(enabled)
@@ -904,6 +1204,7 @@ class TrajectoryApp(MainWindowUI):
         self.anim_run_combo.blockSignals(True)
         self.anim_run_combo.clear()
         self.anim_run_combo.blockSignals(False)
+        self.anim_export_gif_btn.setEnabled(False)
         self._set_animation_replay_enabled(False)
         self.animation_panel.setVisible(False)
 
@@ -991,6 +1292,146 @@ class TrajectoryApp(MainWindowUI):
         if self.anim_run_combo.currentIndex() <= 0:
             return
         self._render_dynamic_wind_frame(self.animation_frame)
+
+    def _on_animation_view_changed(self, _index: int) -> None:
+        """Перерисовывает запись при смене камеры, области или режима среза."""
+        if not self.animation_data:
+            return
+        if self.anim_run_combo.currentIndex() <= 0:
+            return
+        self._render_dynamic_wind_frame(self.animation_frame)
+
+    def _export_animation_gif(self) -> None:
+        """Экспортирует запись выбранного пуска в GIF для презентации."""
+        if not self.animation_data:
+            return
+
+        try:
+            from PIL import Image
+        except ImportError:
+            QMessageBox.warning(
+                self,
+                "Экспорт GIF",
+                "Для экспорта GIF нужен пакет Pillow. В текущем Python он не найден.",
+            )
+            return
+
+        trajectories = self.animation_data.get("trajectories", [])
+        if not trajectories:
+            return
+
+        self.animation_timer.stop()
+        self.anim_play_btn.setText("Пуск")
+
+        old_run_index = self.anim_run_combo.currentIndex()
+        old_frame = self.animation_frame
+        old_camera = self.anim_camera_combo.currentText()
+        old_region = self.anim_region_combo.currentText()
+        old_view = self.anim_view_combo.currentText()
+        old_density = self.anim_density_combo.currentText()
+        old_zoom = self.anim_zoom_slider.value()
+        old_elev, old_azim = self._current_3d_view()
+
+        camera_choice = QMessageBox.question(
+            self,
+            "Экспорт GIF",
+            (
+                "Какой ракурс камеры использовать?\n\n"
+                "Да — оптимальный презентационный ракурс.\n"
+                "Нет — текущий ракурс, который вы выставили мышью."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if camera_choice == QMessageBox.StandardButton.Yes:
+            export_elev, export_azim = 24, -58
+        else:
+            export_elev, export_azim = old_elev, old_azim
+
+        export_run_index = old_run_index if old_run_index > 0 else 1
+        run_number = export_run_index
+        metadata = self.animation_data.get("metadata", {})
+        scenario = str(metadata.get("scenario", "wind"))
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = Path(__file__).parent / "exports"
+        export_dir.mkdir(exist_ok=True)
+        export_path = export_dir / f"{scenario}_run_{run_number}_{timestamp}.gif"
+
+        frame_count = len(self.animation_data["frame_times"])
+        export_count = min(96, frame_count)
+        export_frames = np.unique(
+            np.linspace(0, frame_count - 1, export_count, dtype=int)
+        )
+
+        frames = []
+        try:
+            self.anim_export_gif_btn.setEnabled(False)
+            self.anim_export_gif_btn.setText("GIF...")
+            if old_run_index <= 0:
+                self.anim_run_combo.setCurrentIndex(export_run_index)
+                self.anim_camera_combo.setCurrentText("Следить за снарядом")
+                self.anim_region_combo.setCurrentText("Куб средний")
+                self.anim_view_combo.setCurrentText("3D поле")
+                self.anim_density_combo.setCurrentText("80")
+                self.anim_zoom_slider.setValue(35)
+
+            self.main_ax.view_init(elev=export_elev, azim=export_azim)
+            for i, frame_index in enumerate(export_frames, start=1):
+                self._render_dynamic_wind_frame(int(frame_index))
+                self.main_ax.view_init(elev=export_elev, azim=export_azim)
+                self.main_canvas.draw()
+
+                buf = io.BytesIO()
+                self.main_fig.savefig(
+                    buf,
+                    format="png",
+                    dpi=100,
+                    facecolor="white",
+                    bbox_inches="tight",
+                )
+                buf.seek(0)
+                palette = getattr(getattr(Image, "Palette", Image), "ADAPTIVE")
+                frames.append(Image.open(buf).convert("P", palette=palette).copy())
+                buf.close()
+
+                self.anim_export_gif_btn.setText(f"GIF {i}/{len(export_frames)}")
+                QApplication.processEvents()
+
+            if frames:
+                frames[0].save(
+                    export_path,
+                    save_all=True,
+                    append_images=frames[1:],
+                    duration=130,
+                    loop=0,
+                    optimize=True,
+                )
+                self.info_display.setText(
+                    f"{self.info_display.toPlainText()}\n\nGIF экспортирован:\n{export_path}"
+                )
+                QMessageBox.information(
+                    self,
+                    "Экспорт GIF",
+                    f"GIF сохранён:\n{export_path}",
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "Экспорт GIF", f"Не удалось создать GIF:\n{exc}")
+        finally:
+            self.anim_run_combo.setCurrentIndex(old_run_index)
+            self.anim_camera_combo.setCurrentText(old_camera)
+            self.anim_region_combo.setCurrentText(old_region)
+            self.anim_view_combo.setCurrentText(old_view)
+            self.anim_density_combo.setCurrentText(old_density)
+            self.anim_zoom_slider.setValue(old_zoom)
+            self.animation_frame = old_frame
+            if old_run_index <= 0:
+                self._render_dynamic_wind_summary()
+            else:
+                self._render_dynamic_wind_frame(old_frame)
+                self.main_ax.view_init(elev=old_elev, azim=old_azim)
+                self.main_canvas.draw_idle()
+            self.anim_export_gif_btn.setText("GIF")
+            self.anim_export_gif_btn.setEnabled(True)
 
     def _current_3d_view(self) -> tuple:
         """Возвращает текущий ракурс 3D-оси, чтобы кадры не сбрасывали поворот."""
