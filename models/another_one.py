@@ -438,7 +438,7 @@ def calculate(params: dict) -> tuple:
         all_trajectories.append(traj)
 
     label = (
-        f"6-DoF МК: N={n_runs}, D={D*100:.0f}мм, "
+        f"6-DoF МК: N={n_runs}, D={D*1000:.0f}мм, "
         f"L={L*100:.0f}см, m={mass}кг, Wind≤{wind_max}м/с"
     )
     return all_trajectories, True, label

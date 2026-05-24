@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QFormLayout, QTextEdit, QFrame,
     QPushButton, QLabel, QSizePolicy, QSplitter, QScrollArea,
+    QSlider,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
@@ -108,6 +109,13 @@ class MainWindowUI(QMainWindow):
         self.model_combo = QComboBox()
         layout.addWidget(self.model_combo)
 
+        self.scenario_preset_label = QLabel("<b>Сценарий демонстрации:</b>")
+        self.scenario_preset_combo = QComboBox()
+        self.scenario_preset_label.setVisible(False)
+        self.scenario_preset_combo.setVisible(False)
+        layout.addWidget(self.scenario_preset_label)
+        layout.addWidget(self.scenario_preset_combo)
+
         # Описание задачи
         layout.addWidget(QLabel("<b>Описание задачи:</b>"))
         self.info_display = QTextEdit(readOnly=True)
@@ -170,6 +178,11 @@ class MainWindowUI(QMainWindow):
         Figure создаётся через Figure() без pyplot и вручную привязывается
         к FigureCanvasQTAgg — нет конфликта двух event loop на Windows.
         """
+        chart_widget = QWidget()
+        chart_layout = QVBoxLayout(chart_widget)
+        chart_layout.setContentsMargins(0, 0, 0, 0)
+        chart_layout.setSpacing(0)
+
         self.main_fig = Figure(figsize=(9, 7))
         self.main_fig.set_tight_layout(True)
         self.main_ax = self.main_fig.add_subplot(111)
@@ -179,7 +192,50 @@ class MainWindowUI(QMainWindow):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
-        self.splitter.addWidget(self.main_canvas)
+        chart_layout.addWidget(self.main_canvas, 1)
+
+        self.animation_panel = QWidget()
+        self.animation_panel.setVisible(False)
+        anim_layout = QHBoxLayout(self.animation_panel)
+        anim_layout.setContentsMargins(10, 6, 10, 6)
+        anim_layout.setSpacing(8)
+
+        self.anim_run_combo = QComboBox()
+        self.anim_run_combo.setMinimumWidth(130)
+        self.anim_density_combo = QComboBox()
+        self.anim_density_combo.addItems(["40", "80", "160", "256"])
+        self.anim_density_combo.setCurrentText("80")
+        self.anim_density_combo.setMinimumWidth(70)
+        self.anim_zoom_label = QLabel("Zoom 35%")
+        self.anim_zoom_label.setMinimumWidth(76)
+        self.anim_zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.anim_zoom_slider.setMinimum(0)
+        self.anim_zoom_slider.setMaximum(100)
+        self.anim_zoom_slider.setValue(35)
+        self.anim_zoom_slider.setFixedWidth(130)
+        self.anim_prev_btn = QPushButton("Назад")
+        self.anim_play_btn = QPushButton("Пуск")
+        self.anim_next_btn = QPushButton("Вперёд")
+        self.anim_slider = QSlider(Qt.Orientation.Horizontal)
+        self.anim_slider.setMinimum(0)
+        self.anim_slider.setMaximum(0)
+        self.anim_time_label = QLabel("t = 0.00 c")
+        self.anim_time_label.setMinimumWidth(110)
+        self.anim_time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        anim_layout.addWidget(self.anim_run_combo)
+        anim_layout.addWidget(QLabel("Стрелки"))
+        anim_layout.addWidget(self.anim_density_combo)
+        anim_layout.addWidget(self.anim_zoom_label)
+        anim_layout.addWidget(self.anim_zoom_slider)
+        anim_layout.addWidget(self.anim_prev_btn)
+        anim_layout.addWidget(self.anim_play_btn)
+        anim_layout.addWidget(self.anim_next_btn)
+        anim_layout.addWidget(self.anim_slider, 1)
+        anim_layout.addWidget(self.anim_time_label)
+
+        chart_layout.addWidget(self.animation_panel)
+        self.splitter.addWidget(chart_widget)
 
     # ------------------------------------------------------------------
     # Публичный метод рендеринга формулы

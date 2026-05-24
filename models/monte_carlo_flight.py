@@ -100,40 +100,39 @@ def calculate(params):
 
         # Интегрирование одной траектории (RK4)
         for _ in range(5000):
-            x, y, vx, vy = state
-
-            # Относительная скорость тела относительно ветра
-            vx_rel = vx - v_wind
-            v_rel = np.sqrt(vx_rel ** 2 + vy ** 2)
-
-            if v_rel < 1e-6:
-                ax, ay = 0.0, -g
-            else:
-                # Плотность воздуха (упрощенно константа, либо можно вернуть экспоненту)
-                rho = 1.225
-                coeff = (rho * s_area * v_rel) / (2 * m)
-
-                # Сила сопротивления воздуха действует против ОТНОСИТЕЛЬНОЙ скорости
-                ax = -coeff * cx * vx_rel
-                ay = -g - coeff * cx * vy
-
-            # Функция производных для RK4 движка
             def rk_step(st):
+                """Правая часть ОДУ для текущего состояния RK4."""
+                _, _, vx, vy = st
+                vx_rel = vx - v_wind
+                v_rel = np.sqrt(vx_rel ** 2 + vy ** 2)
+
+                if v_rel < 1e-6:
+                    ax, ay = 0.0, -g
+                else:
+                    # Плотность воздуха упрощенно постоянна в этой модели.
+                    rho = 1.225
+                    coeff = (rho * s_area * v_rel) / (2 * m)
+
+                    # Сила сопротивления воздуха действует против относительной скорости.
+                    ax = -coeff * cx * vx_rel
+                    ay = -g - coeff * cx * vy
+
                 return np.array([vx, vy, ax, ay])
 
             # Шаг Рунге-Кутты 4 порядка
+            prev_state = state.copy()
             k1 = rk_step(state)
             k2 = rk_step(state + k1 * dt / 2)
             k3 = rk_step(state + k2 * dt / 2)
             k4 = rk_step(state + k3 * dt)
 
-            state += (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
+            state = state + (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
 
             # Условие падения
             if state[1] < 0:
                 # Интерполяция финальной точки на землю
-                fraction = y / (y - state[1])
-                x_end = x + fraction * (state[0] - x)
+                fraction = prev_state[1] / (prev_state[1] - state[1])
+                x_end = prev_state[0] + fraction * (state[0] - prev_state[0])
                 traj_single.append(np.array([x_end, 0.0]))
                 break
 

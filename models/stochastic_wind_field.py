@@ -91,54 +91,58 @@ def calculate(params):
         traj_single = [state[:3].copy()]
 
         for _ in range(5000):
-            x, y, z, vx_c, vy_c, vz_c = state
-
-            # 1. ГЕНЕРАЦИЯ ВЕТРОВОГО ПОЛЯ (Зависимость от высоты y + случайный порыв)
-            # Избегаем отрицательных высот под корнем с помощью max(y, 0)
-            height_factor = (max(y, 0.0) / 10.0) ** 0.15
-
-            # На каждом шаге генерируется уникальный случайный шум турбулентности
-            w_x = w0_x * height_factor + np.random.normal(0, turb_std)
-            w_z = w0_z * height_factor + np.random.normal(0, turb_std)
-
-            # Относительная скорость снаряда в ветровом поле
-            vx_rel = vx_c - w_x
-            vz_rel = vz_c - w_z
-            v_rel = np.sqrt(vx_rel ** 2 + vy_c ** 2 + vz_rel ** 2)
-
-            if v_rel < 1e-6:
-                ax, ay, az = 0.0, -g, 0.0
-            else:
-                # 2. УЧЕТ ВОЛНОВОГО КРИЗИСА (Число Маха)
-                mach = v_rel / v_sound
-                # Гладкая функция (сигмоида) для моделирования скачка Cx при переходе через M=1
-                cx_dynamic = cx0 * (1.0 + 1.5 / (1.0 + np.exp(-20.0 * (mach - 1.0))))
-
-                # Атмосфера
-                rho = 1.225 * np.exp(-y / 8430.0)
-                base_coeff = (rho * s_area) / (2 * m)
-
-                # Силы: лобовое сопротивление (Cx) и подъемная сила (Cy)
-                # Подъемная сила перпендикулярна вектору относительной скорости
-                ax = -base_coeff * v_rel * (cx_dynamic * vx_rel + cy * vy_c)
-                ay = -g - base_coeff * v_rel * (cx_dynamic * vy_c - cy * vx_rel)
-                az = -base_coeff * v_rel * (cx_dynamic * vz_rel)
+            # Один случайный порыв на шаг интегрирования; высотная часть ветра
+            # пересчитывается внутри RK4 для каждого промежуточного состояния.
+            gust_x = np.random.normal(0, turb_std)
+            gust_z = np.random.normal(0, turb_std)
 
             # Алгоритм численного интегрирования RK4
             def get_derivs(st):
+                """Правая часть ОДУ для текущего состояния RK4."""
+                _, y, _, vx_c, vy_c, vz_c = st
+
+                # 1. Генерация ветрового поля: высотный сдвиг + порыв.
+                height_factor = (max(y, 0.0) / 10.0) ** 0.15
+                w_x = w0_x * height_factor + gust_x
+                w_z = w0_z * height_factor + gust_z
+
+                # Относительная скорость снаряда в ветровом поле
+                vx_rel = vx_c - w_x
+                vz_rel = vz_c - w_z
+                v_rel = np.sqrt(vx_rel ** 2 + vy_c ** 2 + vz_rel ** 2)
+
+                if v_rel < 1e-6:
+                    ax, ay, az = 0.0, -g, 0.0
+                else:
+                    # 2. Учет волнового кризиса (число Маха)
+                    mach = v_rel / v_sound
+                    cx_dynamic = cx0 * (
+                        1.0 + 1.5 / (1.0 + np.exp(-20.0 * (mach - 1.0)))
+                    )
+
+                    # Атмосфера
+                    rho = 1.225 * np.exp(-max(y, 0.0) / 8430.0)
+                    base_coeff = (rho * s_area) / (2 * m)
+
+                    # Силы: лобовое сопротивление (Cx) и подъемная сила (Cy)
+                    ax = -base_coeff * v_rel * (cx_dynamic * vx_rel + cy * vy_c)
+                    ay = -g - base_coeff * v_rel * (cx_dynamic * vy_c - cy * vx_rel)
+                    az = -base_coeff * v_rel * (cx_dynamic * vz_rel)
+
                 return np.array([vx_c, vy_c, vz_c, ax, ay, az])
 
+            prev_state = state.copy()
             k1 = get_derivs(state)
             k2 = get_derivs(state + k1 * dt / 2)
             k3 = get_derivs(state + k2 * dt / 2)
             k4 = get_derivs(state + k3 * dt)
 
-            state += (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
+            state = state + (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
 
             if state[1] < 0:
-                fraction = y / (y - state[1])
-                x_end = x + fraction * (state[0] - x)
-                z_end = z + fraction * (state[2] - z)
+                fraction = prev_state[1] / (prev_state[1] - state[1])
+                x_end = prev_state[0] + fraction * (state[0] - prev_state[0])
+                z_end = prev_state[2] + fraction * (state[2] - prev_state[2])
                 traj_single.append(np.array([x_end, 0.0, z_end]))
                 break
 

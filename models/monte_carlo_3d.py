@@ -108,41 +108,43 @@ def calculate(params):
         traj_single = [state[:3].copy()]  # Сохраняем X, Y, Z
 
         for _ in range(4000):
-            x, y, z, vx_c, vy_c, vz_c = state
-
-            # Расчет относительной скорости снаряда с учетом ветра
-            vx_rel = vx_c - w_x
-            vz_rel = vz_c - w_z
-            v_rel = np.sqrt(vx_rel ** 2 + vy_c ** 2 + vz_rel ** 2)
-
-            if v_rel < 1e-6:
-                ax, ay, az = 0.0, -g, 0.0
-            else:
-                rho = 1.225 * np.exp(-y / 8430.0)  # Экспоненциальная атмосфера
-                coeff = (rho * s_area * v_rel) / (2 * m)
-
-                # Сила сопротивления направлена строго против вектора относительной скорости
-                ax = -coeff * cx * vx_rel
-                ay = -g - coeff * cx * vy_c
-                az = -coeff * cx * vz_rel
-
             # Шаг Рунге-Кутты 4-го порядка
             def rk_derivatives(st):
+                """Правая часть ОДУ для текущего состояния RK4."""
+                _, y, _, vx_c, vy_c, vz_c = st
+
+                # Расчет относительной скорости снаряда с учетом ветра
+                vx_rel = vx_c - w_x
+                vz_rel = vz_c - w_z
+                v_rel = np.sqrt(vx_rel ** 2 + vy_c ** 2 + vz_rel ** 2)
+
+                if v_rel < 1e-6:
+                    ax, ay, az = 0.0, -g, 0.0
+                else:
+                    rho = 1.225 * np.exp(-max(y, 0.0) / 8430.0)
+                    coeff = (rho * s_area * v_rel) / (2 * m)
+
+                    # Сила сопротивления направлена строго против относительной скорости.
+                    ax = -coeff * cx * vx_rel
+                    ay = -g - coeff * cx * vy_c
+                    az = -coeff * cx * vz_rel
+
                 return np.array([vx_c, vy_c, vz_c, ax, ay, az])
 
+            prev_state = state.copy()
             k1 = rk_derivatives(state)
             k2 = rk_derivatives(state + k1 * dt / 2)
             k3 = rk_derivatives(state + k2 * dt / 2)
             k4 = rk_derivatives(state + k3 * dt)
 
-            state += (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
+            state = state + (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
 
             # Условие встречи с поверхностью земли (y < 0)
             if state[1] < 0:
                 # Интерполяция конечной точки по осям X и Z
-                fraction = y / (y - state[1])
-                x_end = x + fraction * (state[0] - x)
-                z_end = z + fraction * (state[2] - z)
+                fraction = prev_state[1] / (prev_state[1] - state[1])
+                x_end = prev_state[0] + fraction * (state[0] - prev_state[0])
+                z_end = prev_state[2] + fraction * (state[2] - prev_state[2])
                 traj_single.append(np.array([x_end, 0.0, z_end]))
                 break
 
