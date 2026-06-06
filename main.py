@@ -214,19 +214,27 @@ class TrajectoryApp(MainWindowUI):
         self.param_widgets: dict = {}
         self.param_labels: dict = {}
         self.animation_data: dict | None = None
+        self.basic_export_data: dict | None = None
+        self.model4_export_data: dict | None = None
         self.animation_frame: int = 0
         self._resume_animation_after_drag = False
+        self._presentation_export_active = False
         self.animation_timer = QTimer(self)
         self.animation_timer.setInterval(120)
 
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self.scenario_preset_combo.currentIndexChanged.connect(self._on_scenario_preset_changed)
         self.calc_btn.clicked.connect(self.run_calculation)
+        self.export_basic_graph_btn.clicked.connect(self._on_primary_export_clicked)
+        self.export_compare_2d_btn.clicked.connect(self._on_secondary_export_clicked)
+        self.export_diploma_graph_btn.clicked.connect(self._export_model4_diploma_png)
         self.animation_timer.timeout.connect(self._advance_animation_frame)
         self.anim_play_btn.clicked.connect(self._toggle_animation)
         self.anim_prev_btn.clicked.connect(self._previous_animation_frame)
         self.anim_next_btn.clicked.connect(self._next_animation_frame)
         self.anim_export_gif_btn.clicked.connect(self._export_animation_gif)
+        self.anim_export_png_btn.clicked.connect(self._export_current_graph_png)
+        self.anim_export_presentation_btn.clicked.connect(self._export_presentation_graph_png)
         self.anim_slider.valueChanged.connect(self._on_animation_slider_changed)
         self.anim_run_combo.currentIndexChanged.connect(self._on_animation_run_changed)
         self.anim_zoom_slider.valueChanged.connect(self._on_animation_zoom_changed)
@@ -304,6 +312,8 @@ class TrajectoryApp(MainWindowUI):
             return
 
         self._disable_animation_controls()
+        self._disable_basic_export()
+        self._configure_static_export_buttons(model_name)
 
         info = self.models[model_name].get_info()
 
@@ -315,6 +325,7 @@ class TrajectoryApp(MainWindowUI):
         self.info_display.setText(
             f"{info.get('description', '')}\n\nОбозначения:\n{vars_lines}"
         )
+        self._fit_info_display_to_content()
 
         # 2. Рендеринг LaTeX через Agg → PNG → QPixmap.
         #    ВАЖНО: каждый раз создаём НОВУЮ временную Figure и новый
@@ -325,14 +336,17 @@ class TrajectoryApp(MainWindowUI):
             from matplotlib.figure import Figure as _Figure
             from matplotlib.backends.backend_agg import FigureCanvasAgg as _Agg
 
-            tmp_fig = _Figure(figsize=(3.8, 1.8), facecolor='#f0f0f0')
+            line_count = max(1, formula_text.count("\n") + 1)
+            fig_height = 2.15 if line_count <= 2 else min(3.0, 1.25 + 0.45 * line_count)
+            font_size = 16 if line_count <= 2 else 13
+            tmp_fig = _Figure(figsize=(4.5, fig_height), facecolor='#f0f0f0')
             tmp_canvas = _Agg(tmp_fig)
             tmp_ax = tmp_fig.add_subplot(111)
             tmp_ax.axis('off')
             tmp_ax.text(
                 0.5, 0.5,
                 formula_text,
-                fontsize=11,
+                fontsize=font_size,
                 ha='center',
                 va='center',
                 math_fontfamily='cm',
@@ -374,6 +388,13 @@ class TrajectoryApp(MainWindowUI):
 
         self._configure_scenario_presets(model_name)
         self._update_vortex_param_visibility()
+
+    def _fit_info_display_to_content(self) -> None:
+        """Подбирает высоту описания под раскрытый текст с разумным верхним пределом."""
+        doc = self.info_display.document()
+        doc.setTextWidth(max(self.info_display.viewport().width(), 260))
+        height = int(doc.size().height()) + 24
+        self.info_display.setMinimumHeight(max(190, min(height, 520)))
 
     def _clear_params(self) -> None:
         """Удаляет все виджеты параметров из формы."""
@@ -447,6 +468,7 @@ class TrajectoryApp(MainWindowUI):
         }
 
         self._disable_animation_controls()
+        self._disable_basic_export()
 
         try:
             raw = self.models[model_name].calculate(params)
@@ -479,6 +501,9 @@ class TrajectoryApp(MainWindowUI):
                 self._render_dynamic_wind_model(result, label)
             elif model_name.startswith("6."):
                 self._render_6dof_mc(result)
+            elif model_name.startswith("4."):
+                self._render_monte_carlo_3d_model(result, label, params)
+                self._prepare_model4_export(model_name, label, result, params)
             else:
                 self._render_3d_bundle(result, label)
         else:
@@ -489,6 +514,8 @@ class TrajectoryApp(MainWindowUI):
             else:
                 # Модели 1, 2: одна кривая — кортеж (x_arr, y_arr)
                 self._render_2d_single(result, label)
+                if model_name.startswith(("1.", "2.")):
+                    self._prepare_basic_export(model_name, label, result, params)
 
         if not dynamic_render:
             self.main_ax.set_title(f"Результат: {model_name}", pad=10)
@@ -546,6 +573,602 @@ class TrajectoryApp(MainWindowUI):
         self.main_ax.legend()
         self.main_ax.grid(True, alpha=0.4)
 
+    def _disable_basic_export(self) -> None:
+        """Отключает экспорт презентационного 2D-графика до нового расчёта."""
+        self.basic_export_data = None
+        self.model4_export_data = None
+        self.export_basic_graph_btn.setEnabled(False)
+        self.export_compare_2d_btn.setEnabled(False)
+        self.export_diploma_graph_btn.setEnabled(False)
+
+    def _configure_static_export_buttons(self, model_name: str) -> None:
+        """Показывает статические кнопки экспорта только у моделей, где они полезны."""
+        is_model1 = model_name.startswith("1.")
+        is_model2 = model_name.startswith("2.")
+        is_model4 = model_name.startswith("4.")
+
+        self.export_basic_graph_btn.setVisible(is_model1 or is_model2 or is_model4)
+        self.export_compare_2d_btn.setVisible(is_model2 or is_model4)
+        self.export_diploma_graph_btn.setVisible(is_model4)
+        self.export_basic_graph_btn.setText("ЭКСПОРТ ГРАФИКА")
+        self.export_compare_2d_btn.setText("GIF" if is_model4 else "СРАВНИТЬ С ВАКУУМОМ")
+
+    def _on_primary_export_clicked(self) -> None:
+        """Первая статическая кнопка экспорта: 2D-график или PNG модели 4."""
+        model_name = self.model_combo.currentText()
+        if model_name.startswith("4."):
+            self._export_model4_png()
+        else:
+            self._export_basic_2d_graph()
+
+    def _on_secondary_export_clicked(self) -> None:
+        """Вторая статическая кнопка: сравнение модели 2 или GIF модели 4."""
+        model_name = self.model_combo.currentText()
+        if model_name.startswith("4."):
+            self._export_model4_orbit_gif()
+        elif model_name.startswith("2."):
+            self._export_model2_comparison()
+
+    def _prepare_basic_export(
+        self,
+        model_name: str,
+        label: str,
+        result: tuple,
+        params: dict,
+    ) -> None:
+        """Сохраняет данные последнего расчёта модели 1/2 для экспорта."""
+        x_arr, y_arr = result
+        self.basic_export_data = {
+            "model_name": model_name,
+            "label": label,
+            "x": np.asarray(x_arr, dtype=float),
+            "y": np.asarray(y_arr, dtype=float),
+            "params": dict(params),
+        }
+        self.export_basic_graph_btn.setEnabled(True)
+        self.export_compare_2d_btn.setEnabled(model_name.startswith("2."))
+
+    def _prepare_model4_export(
+        self,
+        model_name: str,
+        label: str,
+        trajectories: list,
+        params: dict,
+    ) -> None:
+        """Сохраняет данные модели 4 для PNG/GIF экспорта."""
+        self.model4_export_data = {
+            "model_name": model_name,
+            "label": label,
+            "trajectories": [np.asarray(t, dtype=float) for t in trajectories],
+            "params": dict(params),
+        }
+        self.export_basic_graph_btn.setEnabled(True)
+        self.export_compare_2d_btn.setEnabled(True)
+        self.export_diploma_graph_btn.setEnabled(True)
+
+    def _export_basic_2d_graph(self) -> None:
+        """Экспортирует модели 1/2 как готовый презентационный PNG с метриками."""
+        if not self.basic_export_data:
+            QMessageBox.information(
+                self,
+                "Экспорт графика",
+                "Сначала выполните расчёт модели 1 или 2.",
+            )
+            return
+
+        try:
+            from matplotlib.figure import Figure
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Экспорт графика",
+                f"Не удалось подготовить Matplotlib Figure:\n{exc}",
+            )
+            return
+
+        data = self.basic_export_data
+        model_name = data["model_name"]
+        label = data["label"]
+        x_arr = data["x"]
+        y_arr = data["y"]
+        params = data["params"]
+        metrics = self._basic_2d_metrics(model_name, x_arr, y_arr, params)
+        param_lines = self._basic_2d_param_lines(model_name, params)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = Path(__file__).parent / "exports"
+        export_dir.mkdir(exist_ok=True)
+        safe_model = "model1" if model_name.startswith("1.") else "model2"
+        export_path = export_dir / f"{safe_model}_summary_{timestamp}.png"
+
+        fig = Figure(figsize=(12.5, 6.8), facecolor="white", constrained_layout=True)
+        export_canvas = FigureCanvasAgg(fig)
+        grid = fig.add_gridspec(1, 2, width_ratios=[2.45, 0.85])
+        ax = fig.add_subplot(grid[0, 0])
+        info_ax = fig.add_subplot(grid[0, 1])
+        info_ax.axis("off")
+
+        is_model1 = model_name.startswith("1.")
+        color = "royalblue" if is_model1 else "firebrick"
+        plot_label = "Идеальная траектория" if is_model1 else "Траектория в атмосфере"
+        export_title = "Модель идеального полёта" if is_model1 else "Модель движения в атмосфере"
+        ax.plot(x_arr, y_arr, lw=3.0, color=color, label=plot_label)
+        ax.scatter([x_arr[-1]], [y_arr[-1]], color=color, s=55, zorder=4)
+        ax.set_title(export_title, pad=10, fontsize=15)
+        ax.set_xlabel("Дальность X, м")
+        ax.set_ylabel("Высота Y, м")
+        ax.grid(True, alpha=0.35)
+        ax.legend(loc="upper right")
+        ax.set_xlim(left=0.0, right=max(float(np.max(x_arr)) * 1.06, 1.0))
+        ax.set_ylim(bottom=0.0, top=max(float(np.max(y_arr)) * 1.16, 1.0))
+
+        info_ax.text(
+            0.0, 0.98,
+            "Итоги расчёта",
+            fontsize=15,
+            fontweight="bold",
+            va="top",
+            transform=info_ax.transAxes,
+        )
+        y = 0.87
+        for title, value in metrics:
+            info_ax.text(0.0, y, title, fontsize=10.5, color="#555555", transform=info_ax.transAxes)
+            info_ax.text(0.64, y, value, fontsize=12, fontweight="bold", transform=info_ax.transAxes)
+            y -= 0.078
+
+        y -= 0.035
+        info_ax.text(
+            0.0, y,
+            "Основные параметры",
+            fontsize=15,
+            fontweight="bold",
+            va="top",
+            transform=info_ax.transAxes,
+        )
+        y -= 0.085
+        for line in param_lines:
+            info_ax.text(0.0, y, line, fontsize=11.0, transform=info_ax.transAxes)
+            y -= 0.064
+
+        try:
+            export_canvas.print_figure(export_path, dpi=220, facecolor="white")
+            QMessageBox.information(
+                self,
+                "Экспорт графика",
+                f"График сохранён:\n{export_path}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Экспорт графика",
+                f"Не удалось сохранить график:\n{exc}",
+            )
+
+    def _export_model2_comparison(self) -> None:
+        """Экспортирует сравнение модели 2 с идеальной моделью при тех же v0/angle/g."""
+        if not self.basic_export_data or not self.basic_export_data["model_name"].startswith("2."):
+            QMessageBox.information(
+                self,
+                "Сравнение моделей",
+                "Сначала выполните расчёт модели 2.",
+            )
+            return
+
+        try:
+            from matplotlib.figure import Figure
+            from matplotlib.patches import Rectangle
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Сравнение моделей",
+                f"Не удалось подготовить Matplotlib Figure:\n{exc}",
+            )
+            return
+
+        data = self.basic_export_data
+        params = data["params"]
+        x_atm = data["x"]
+        y_atm = data["y"]
+        x_vac, y_vac = self._ideal_curve_from_params(params)
+
+        metrics_vac = self._basic_2d_metrics("1. Идеальный полёт", x_vac, y_vac, params)
+        metrics_atm = self._basic_2d_metrics("2. Атмосфера", x_atm, y_atm, params)
+
+        range_vac = float(x_vac[-1])
+        range_atm = float(x_atm[-1])
+        height_vac = float(np.max(y_vac))
+        height_atm = float(np.max(y_atm))
+        range_loss = range_vac - range_atm
+        range_loss_pct = 100.0 * range_loss / max(range_vac, 1e-9)
+        height_delta = height_atm - height_vac
+        height_loss = height_vac - height_atm
+        height_loss_pct = 100.0 * height_loss / max(height_vac, 1e-9)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = Path(__file__).parent / "exports"
+        export_dir.mkdir(exist_ok=True)
+        export_path = export_dir / f"model2_vs_vacuum_{timestamp}.png"
+
+        fig = Figure(figsize=(13.4, 7.2), facecolor="white", constrained_layout=True)
+        export_canvas = FigureCanvasAgg(fig)
+        grid = fig.add_gridspec(1, 2, width_ratios=[2.25, 1.05])
+        ax = fig.add_subplot(grid[0, 0])
+        info_ax = fig.add_subplot(grid[0, 1])
+        info_ax.axis("off")
+
+        ax.plot(x_vac, y_vac, lw=3.0, color="royalblue", label="Идеальный полёт")
+        ax.plot(x_atm, y_atm, lw=3.0, color="firebrick", label="Полёт в атмосфере")
+        ax.scatter([x_vac[-1]], [0.0], color="royalblue", s=55, zorder=4)
+        ax.scatter([x_atm[-1]], [0.0], color="firebrick", s=55, zorder=4)
+        ax.set_title("Сравнение полёта в вакууме и атмосфере", pad=10, fontsize=14)
+        ax.set_xlabel("Дальность X, м")
+        ax.set_ylabel("Высота Y, м")
+        ax.grid(True, alpha=0.35)
+        ax.legend(loc="upper right")
+        ax.set_xlim(left=0.0, right=max(float(np.max(x_vac)), float(np.max(x_atm))) * 1.06)
+        ax.set_ylim(bottom=0.0, top=max(float(np.max(y_vac)), float(np.max(y_atm))) * 1.16)
+
+        info_ax.text(
+            0.0, 0.98,
+            "Итоги",
+            fontsize=16,
+            fontweight="bold",
+            va="top",
+            transform=info_ax.transAxes,
+        )
+        table_left, table_right = 0.0, 0.98
+        table_top = 0.89
+        row_h = 0.058
+        col_x = [0.02, 0.47, 0.73]
+        table_rows = [
+            ("Показатель", "Вакуум", "Атмосфера"),
+            ("Дальность", metrics_vac[0][1], metrics_atm[0][1]),
+            ("Макс. высота", metrics_vac[1][1], metrics_atm[1][1]),
+            ("Время", metrics_vac[2][1], metrics_atm[2][1]),
+            ("Потеря дальности", "—", f"{range_loss:.1f} м"),
+            ("Потеря высоты", "—", f"{height_loss:.1f} м"),
+        ]
+        for i, row in enumerate(table_rows):
+            y0 = table_top - i * row_h
+            bg = "#f1f3f6" if i == 0 else ("#ffffff" if i % 2 else "#f8f9fb")
+            info_ax.add_patch(
+                Rectangle(
+                    (table_left, y0 - row_h + 0.006),
+                    table_right - table_left,
+                    row_h,
+                    transform=info_ax.transAxes,
+                    facecolor=bg,
+                    edgecolor="#d3d7de",
+                    linewidth=0.6,
+                )
+            )
+            for j, text in enumerate(row):
+                info_ax.text(
+                    col_x[j],
+                    y0 - 0.036,
+                    text,
+                    fontsize=9.0 if i == 0 else 9.4,
+                    fontweight="bold" if (i == 0 or j > 0) else "normal",
+                    color="#222222" if i == 0 else ("#111111" if j > 0 else "#555555"),
+                    transform=info_ax.transAxes,
+                )
+
+        info_ax.text(
+            0.02, 0.515,
+            f"Потеря дальности: {range_loss_pct:.1f}%",
+            fontsize=10.2,
+            fontweight="bold",
+            color="#333333",
+            transform=info_ax.transAxes,
+        )
+        info_ax.text(
+            0.02, 0.475,
+            f"Потеря высоты: {height_loss_pct:.1f}%",
+            fontsize=10.2,
+            fontweight="bold",
+            color="#333333",
+            transform=info_ax.transAxes,
+        )
+
+        info_ax.text(
+            0.0, 0.43,
+            "Общие условия",
+            fontsize=14,
+            fontweight="bold",
+            va="top",
+            transform=info_ax.transAxes,
+        )
+        common_lines = [
+            f"v₀: {params.get('v0', '—')} м/с",
+            f"Угол запуска: {params.get('angle', '—')}°",
+        ]
+        y = 0.36
+        for line in common_lines:
+            info_ax.text(0.0, y, line, fontsize=11.4, transform=info_ax.transAxes)
+            y -= 0.058
+
+        info_ax.text(
+            0.0, 0.22,
+            "Параметры модели 2",
+            fontsize=14,
+            fontweight="bold",
+            va="top",
+            transform=info_ax.transAxes,
+        )
+        model2_lines = [
+            f"Масса: {params.get('m', '—')} кг",
+            f"Площадь: {params.get('S', '—')} м²",
+            f"Cx: {params.get('Cx', '—')}, Cy: {params.get('Cy', '—')}",
+            f"ρ₀: {params.get('rho0', '—')} кг/м³",
+        ]
+        y = 0.155
+        for line in model2_lines:
+            info_ax.text(0.0, y, line, fontsize=10.2, color="#333333", transform=info_ax.transAxes)
+            y -= 0.039
+
+        try:
+            export_canvas.print_figure(export_path, dpi=220, facecolor="white")
+            QMessageBox.information(
+                self,
+                "Сравнение моделей",
+                f"Сравнительный график сохранён:\n{export_path}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Сравнение моделей",
+                f"Не удалось сохранить график:\n{exc}",
+            )
+
+    def _export_model4_png(self) -> None:
+        """Экспортирует модель 4 в PNG с выбранным ракурсом камеры."""
+        if not self.model4_export_data:
+            QMessageBox.information(
+                self,
+                "Экспорт графика",
+                "Сначала выполните расчёт модели 4.",
+            )
+            return
+
+        camera_choice = QMessageBox.question(
+            self,
+            "Экспорт графика",
+            (
+                "Какой ракурс камеры использовать?\n\n"
+                "Да — оптимальный презентационный ракурс.\n"
+                "Нет — текущий ракурс, который вы выставили мышью."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if camera_choice == QMessageBox.StandardButton.Yes:
+            elev, azim = 22, -58
+        else:
+            elev, azim = self._current_3d_view()
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = Path(__file__).parent / "exports"
+        export_dir.mkdir(exist_ok=True)
+        export_path = export_dir / f"model4_monte_carlo_3d_{timestamp}.png"
+
+        try:
+            from matplotlib.figure import Figure
+            fig = Figure(figsize=(8.4, 7.2), facecolor="white", constrained_layout=True)
+            canvas = FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111, projection="3d")
+            self._render_model4_scene(
+                ax,
+                self.model4_export_data["trajectories"],
+                self.model4_export_data["label"],
+                self.model4_export_data["params"],
+                add_panel=True,
+                elev=elev,
+                azim=azim,
+            )
+            canvas.print_figure(
+                export_path,
+                dpi=210,
+                facecolor="white",
+                bbox_inches="tight",
+                pad_inches=0.25,
+            )
+            QMessageBox.information(
+                self,
+                "Экспорт графика",
+                f"График сохранён:\n{export_path}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Экспорт графика",
+                f"Не удалось сохранить график:\n{exc}",
+            )
+
+    def _export_model4_diploma_png(self) -> None:
+        """Экспортирует модель 4 в более лаконичном виде для вставки в диплом."""
+        if not self.model4_export_data:
+            QMessageBox.information(
+                self,
+                "График для диплома",
+                "Сначала выполните расчёт модели 4.",
+            )
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = Path(__file__).parent / "exports"
+        export_dir.mkdir(exist_ok=True)
+        export_path = export_dir / f"model4_diploma_{timestamp}.png"
+
+        try:
+            from matplotlib.figure import Figure
+            fig = Figure(figsize=(8.8, 7.2), facecolor="white", constrained_layout=True)
+            canvas = FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111, projection="3d")
+            self._render_model4_diploma_scene(
+                ax,
+                self.model4_export_data["trajectories"],
+                elev=22,
+                azim=-58,
+            )
+            canvas.print_figure(
+                export_path,
+                dpi=230,
+                facecolor="white",
+                bbox_inches="tight",
+                pad_inches=0.18,
+            )
+            QMessageBox.information(
+                self,
+                "График для диплома",
+                f"График сохранён:\n{export_path}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "График для диплома",
+                f"Не удалось сохранить график:\n{exc}",
+            )
+
+    def _export_model4_orbit_gif(self) -> None:
+        """Экспортирует модель 4 как GIF полного оборота вокруг 3D-сцены."""
+        if not self.model4_export_data:
+            QMessageBox.information(
+                self,
+                "Экспорт GIF",
+                "Сначала выполните расчёт модели 4.",
+            )
+            return
+
+        try:
+            from PIL import Image
+            from matplotlib.figure import Figure
+        except ImportError as exc:
+            QMessageBox.warning(
+                self,
+                "Экспорт GIF",
+                f"Для экспорта GIF нужен Pillow и Matplotlib:\n{exc}",
+            )
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = Path(__file__).parent / "exports"
+        export_dir.mkdir(exist_ok=True)
+        export_path = export_dir / f"model4_monte_carlo_3d_orbit_{timestamp}.gif"
+
+        old_text = self.export_compare_2d_btn.text()
+        frames = []
+        frame_count = 72
+        elev = 22
+        azimuths = np.linspace(-58, 302, frame_count, endpoint=False)
+        try:
+            self.export_compare_2d_btn.setEnabled(False)
+            for i, azim in enumerate(azimuths, start=1):
+                fig = Figure(figsize=(8.4, 7.2), facecolor="white", constrained_layout=True)
+                canvas = FigureCanvasAgg(fig)
+                ax = fig.add_subplot(111, projection="3d")
+                self._render_model4_scene(
+                    ax,
+                    self.model4_export_data["trajectories"],
+                    self.model4_export_data["label"],
+                    self.model4_export_data["params"],
+                    add_panel=True,
+                    elev=elev,
+                    azim=float(azim),
+                )
+                buf = io.BytesIO()
+                canvas.print_figure(
+                    buf,
+                    format="png",
+                    dpi=125,
+                    facecolor="white",
+                    bbox_inches="tight",
+                    pad_inches=0.25,
+                )
+                buf.seek(0)
+                palette = getattr(getattr(Image, "Palette", Image), "ADAPTIVE")
+                frames.append(Image.open(buf).convert("P", palette=palette).copy())
+                buf.close()
+                self.export_compare_2d_btn.setText(f"GIF {i}/{frame_count}")
+                QApplication.processEvents()
+
+            if frames:
+                frames[0].save(
+                    export_path,
+                    save_all=True,
+                    append_images=frames[1:],
+                    duration=190,
+                    loop=0,
+                    optimize=True,
+                )
+                QMessageBox.information(
+                    self,
+                    "Экспорт GIF",
+                    f"GIF сохранён:\n{export_path}",
+                )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Экспорт GIF",
+                f"Не удалось создать GIF:\n{exc}",
+            )
+        finally:
+            self.export_compare_2d_btn.setText(old_text)
+            self.export_compare_2d_btn.setEnabled(True)
+
+    @staticmethod
+    def _ideal_curve_from_params(params: dict) -> tuple:
+        """Строит идеальную траекторию по параметрам модели 2."""
+        v0 = float(params.get("v0", 100.0))
+        angle = np.radians(float(params.get("angle", 45.0)))
+        gravity = float(params.get("g", 9.81))
+        t_max = 2.0 * v0 * np.sin(angle) / max(gravity, 1e-9)
+        t = np.linspace(0.0, t_max, 250)
+        x = v0 * np.cos(angle) * t
+        y = v0 * np.sin(angle) * t - 0.5 * gravity * t ** 2
+        return x, np.maximum(y, 0.0)
+
+    def _basic_2d_metrics(
+        self,
+        model_name: str,
+        x_arr: np.ndarray,
+        y_arr: np.ndarray,
+        params: dict,
+    ) -> list:
+        """Считает ключевые итоги для презентационного экспорта моделей 1/2."""
+        range_m = float(x_arr[-1])
+        max_height_m = float(np.max(y_arr))
+        if model_name.startswith("1."):
+            v0 = float(params.get("v0", 0.0))
+            angle = np.radians(float(params.get("angle", 0.0)))
+            gravity = float(params.get("g", 9.81))
+            flight_time = 2.0 * v0 * np.sin(angle) / max(gravity, 1e-9)
+        else:
+            flight_time = max(len(x_arr) - 1, 0) * 0.005
+
+        return [
+            ("Дальность", f"{range_m:.1f} м"),
+            ("Макс. высота", f"{max_height_m:.1f} м"),
+            ("Время полёта", f"{flight_time:.2f} с"),
+            ("Точек расчёта", f"{len(x_arr)}"),
+        ]
+
+    @staticmethod
+    def _basic_2d_param_lines(model_name: str, params: dict) -> list:
+        """Формирует короткий список параметров, общий для сравнения моделей."""
+        lines = [
+            f"v₀: {params.get('v0', '—')} м/с",
+            f"Угол запуска: {params.get('angle', '—')}°",
+            f"g: {params.get('g', '9.81')} м/с²",
+        ]
+        if model_name.startswith("2."):
+            lines.extend([
+                f"Масса: {params.get('m', '—')} кг",
+                f"Площадь: {params.get('S', '—')} м²",
+                f"Cx: {params.get('Cx', '—')}, Cy: {params.get('Cy', '—')}",
+                f"ρ₀: {params.get('rho0', '—')} кг/м³",
+            ])
+        return lines
+
     def _render_2d_mc(self, result: list, label: str) -> None:
         """
         Пучок 2D-траекторий Монте-Карло + средняя линия (модель 3).
@@ -589,6 +1212,215 @@ class TrajectoryApp(MainWindowUI):
         self.main_ax.set_ylabel("Боковой снос Z, м")
         self.main_ax.set_zlabel("Высота Y, м")
         self.main_ax.legend(fontsize=8)
+
+    def _render_monte_carlo_3d_model(
+        self,
+        trajectories: list,
+        label: str,
+        params: dict,
+    ) -> None:
+        """Рисует модель 4 в презентационном виде."""
+        self._render_model4_scene(self.main_ax, trajectories, label, params, add_panel=True)
+
+    def _render_model4_scene(
+        self,
+        ax,
+        trajectories: list,
+        label: str,
+        params: dict,
+        add_panel: bool,
+        elev: float = 22,
+        azim: float = -58,
+    ) -> None:
+        """Общий рендер модели 4 для экрана, PNG и GIF."""
+        stats = self._model4_stats(trajectories)
+        ax.view_init(elev=elev, azim=azim)
+
+        for traj in trajectories:
+            ax.plot(
+                traj[:, 0], traj[:, 2], traj[:, 1],
+                color="dodgerblue", alpha=0.16, lw=0.8,
+            )
+        ax.plot([], [], [], color="dodgerblue", alpha=0.45, lw=1.2,
+                label=f"Пуски МК (N={len(trajectories)})")
+
+        impacts = np.array([traj[-1] for traj in trajectories])
+        ax.scatter(
+            impacts[:, 0], impacts[:, 2], np.zeros(len(impacts)),
+            color="steelblue", s=16, alpha=0.60, label="Точки падения",
+        )
+
+        for n_sig, color, ls, lw, pct in [
+            (1, "limegreen", "-", 1.8, "68%"),
+            (2, "darkorange", "--", 2.0, "95%"),
+            (3, "crimson", ":", 2.2, "99.7%"),
+        ]:
+            ex, ez, *_ = compute_impact_ellipse(trajectories, n_sig)
+            ax.plot(
+                ex, ez, np.zeros_like(ex),
+                color=color, lw=lw, ls=ls,
+                label=f"Эллипс {n_sig}σ ({pct})",
+            )
+
+        mean = compute_mean_trajectory(trajectories)
+        ax.plot(
+            mean[:, 0], mean[:, 2], mean[:, 1],
+            color="red", lw=2.6, label="Средняя траектория",
+        )
+        ax.scatter(
+            [stats["center_x"]], [stats["center_z"]], [0.0],
+            color="red", s=88, marker="X",
+            label=f"Мишень σx={stats['std_x']:.1f}м σz={stats['std_z']:.1f}м",
+        )
+
+        all_points = np.vstack(trajectories)
+        x_max = max(float(np.max(all_points[:, 0])) * 1.08, 1.0)
+        y_max = max(float(np.max(all_points[:, 1])) * 1.18, 1.0)
+        z_abs = max(float(np.max(np.abs(all_points[:, 2]))) * 1.35, 20.0)
+        ax.set_xlim(0.0, x_max)
+        ax.set_ylim(-z_abs, z_abs)
+        ax.set_zlim(0.0, y_max)
+
+        ax.set_xlabel("Дальность X, м")
+        ax.set_ylabel("Боковой снос Z, м")
+        ax.set_zlabel("Высота Y, м")
+        ax.set_title(f"Результат: {label}", pad=10)
+        ax.legend(loc="upper left", fontsize=7)
+        if add_panel:
+            self._draw_model4_stats_panel(ax, stats, params)
+
+    def _render_model4_diploma_scene(
+        self,
+        ax,
+        trajectories: list,
+        elev: float = 22,
+        azim: float = -58,
+    ) -> None:
+        """Рисует модель 4 в лаконичном виде для дипломной иллюстрации."""
+        stats = self._model4_stats(trajectories)
+        ax.view_init(elev=elev, azim=azim)
+
+        for traj in trajectories:
+            ax.plot(
+                traj[:, 0], traj[:, 2], traj[:, 1],
+                color="lightskyblue", alpha=0.22, lw=0.8,
+            )
+        ax.plot(
+            [], [], [],
+            color="lightskyblue", alpha=0.70, lw=1.4,
+            label=f"Траектории запусков (N={len(trajectories)})",
+        )
+
+        impacts = np.array([traj[-1] for traj in trajectories])
+        ax.scatter(
+            impacts[:, 0], impacts[:, 2], np.zeros(len(impacts)),
+            color="steelblue", s=18, alpha=0.65, label="Точки падения",
+        )
+
+        for n_sig, color, ls, lw, label in [
+            (1, "limegreen", "-", 1.8, "Эллипс 1σ"),
+            (2, "darkorange", "--", 2.0, "Эллипс 2σ"),
+            (3, "crimson", ":", 2.2, "Эллипс 3σ"),
+        ]:
+            ex, ez, *_ = compute_impact_ellipse(trajectories, n_sig)
+            ax.plot(ex, ez, np.zeros_like(ex), color=color, lw=lw, ls=ls, label=label)
+
+        mean = compute_mean_trajectory(trajectories)
+        ax.plot(
+            mean[:, 0], mean[:, 2], mean[:, 1],
+            color="red", lw=2.8, label="Средняя траектория",
+        )
+        ax.scatter(
+            [stats["center_x"]], [stats["center_z"]], [0.0],
+            color="red", s=92, marker="X", label="Центр рассеивания",
+        )
+
+        all_points = np.vstack(trajectories)
+        x_max = max(float(np.max(all_points[:, 0])) * 1.08, 1.0)
+        y_max = max(float(np.max(all_points[:, 1])) * 1.18, 1.0)
+        z_abs = max(float(np.max(np.abs(all_points[:, 2]))) * 1.35, 20.0)
+        ax.set_xlim(0.0, x_max)
+        ax.set_ylim(-z_abs, z_abs)
+        ax.set_zlim(0.0, y_max)
+
+        ax.set_xlabel("Дальность X, м")
+        ax.set_ylabel("Боковой снос Z, м")
+        ax.set_zlabel("Высота Y, м")
+        ax.set_title("Трёхмерное моделирование методом Монте-Карло", pad=10)
+        ax.legend(loc="upper left", fontsize=7.5)
+
+        panel = (
+            "Итоги расчёта\n"
+            f"N = {stats['n']}\n"
+            f"Средняя дальность: {stats['mean_range']:.1f} м\n"
+            f"Средняя высота: {stats['mean_height']:.1f} м\n"
+            f"Разброс: σx={stats['std_x']:.1f} м, σz={stats['std_z']:.1f} м"
+        )
+        ax.text2D(
+            0.985, 0.965,
+            panel,
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=8.6,
+            bbox={
+                "boxstyle": "round,pad=0.35",
+                "facecolor": (1.0, 1.0, 1.0, 0.90),
+                "edgecolor": (0.70, 0.70, 0.70, 0.75),
+                "linewidth": 0.8,
+            },
+        )
+
+    @staticmethod
+    def _model4_stats(trajectories: list) -> dict:
+        """Считает статистику для модели 4."""
+        impacts = np.array([traj[-1] for traj in trajectories])
+        max_heights = np.array([float(np.max(traj[:, 1])) for traj in trajectories])
+        times = np.array([max(len(traj) - 1, 0) * 0.05 for traj in trajectories])
+        mean = compute_mean_trajectory(trajectories)
+        _, _, center_x, center_z, std_x, std_z = compute_impact_ellipse(trajectories, 1)
+        return {
+            "n": len(trajectories),
+            "center_x": center_x,
+            "center_z": center_z,
+            "std_x": std_x,
+            "std_z": std_z,
+            "mean_range": float(np.mean(impacts[:, 0])),
+            "mean_side": float(np.mean(impacts[:, 2])),
+            "mean_height": float(np.mean(max_heights)),
+            "mean_time": float(np.mean(times)),
+            "mean_traj_range": float(mean[-1, 0]),
+        }
+
+    @staticmethod
+    def _draw_model4_stats_panel(ax, stats: dict, params: dict) -> None:
+        """Показывает краткую статистику модели 4 поверх 3D-графика."""
+        panel = (
+            "3D МОНТЕ-КАРЛО\n"
+            f"N: {stats['n']}\n"
+            f"Средняя дальность: {stats['mean_range']:.1f} м\n"
+            f"Средняя высота max: {stats['mean_height']:.1f} м\n"
+            f"Среднее время: {stats['mean_time']:.2f} с\n"
+            f"Мишень: X={stats['center_x']:.1f} м, Z={stats['center_z']:.1f} м\n"
+            f"Разброс: σx={stats['std_x']:.1f} м, σz={stats['std_z']:.1f} м\n"
+            f"Ветер: Wx~{params.get('wx_mean', '—')} м/с, "
+            f"Wz~{params.get('wz_mean', '—')}±{params.get('wind_std', '—')} м/с"
+        )
+        ax.text2D(
+            0.985, 0.985,
+            panel,
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=9,
+            family="monospace",
+            bbox={
+                "boxstyle": "round,pad=0.35",
+                "facecolor": (1.0, 1.0, 1.0, 0.88),
+                "edgecolor": (0.65, 0.65, 0.65, 0.70),
+                "linewidth": 0.8,
+            },
+        )
 
     def _render_6dof_mc(self, result: list) -> None:
         """
@@ -637,6 +1469,8 @@ class TrajectoryApp(MainWindowUI):
 
         self.animation_panel.setVisible(True)
         self.anim_export_gif_btn.setEnabled(True)
+        self.anim_export_png_btn.setEnabled(True)
+        self.anim_export_presentation_btn.setEnabled(True)
         self.anim_play_btn.setText("Пуск")
         self._set_animation_replay_enabled(False)
         self._render_dynamic_wind_summary()
@@ -711,6 +1545,7 @@ class TrajectoryApp(MainWindowUI):
         self.main_ax.set_zlabel("Высота Y, м")
         self.main_ax.set_title(f"{label}\nИтоговый результат по всем пускам", pad=10)
         self.main_ax.legend(loc="upper left", fontsize=7)
+        self._draw_dynamic_summary_panel(trajectories)
 
         self.anim_time_label.setText("Итог")
         self.main_canvas.draw_idle()
@@ -909,7 +1744,7 @@ class TrajectoryApp(MainWindowUI):
                 xlim = (cx - x_half, cx + x_half)
                 ylim = (cz - side_half, cz + side_half)
                 zlim = (cy - height_half, cy + height_half)
-            elif camera_mode == "Следить":
+            elif camera_mode.startswith("Следить"):
                 cx = float(focus[0])
                 cy = float(focus[1])
                 cz = float(focus[2])
@@ -1039,6 +1874,9 @@ class TrajectoryApp(MainWindowUI):
             256: (8, 7, 6),
             384: (8, 8, 7),
             512: (9, 8, 8),
+            1024: (12, 9, 10),
+            2048: (16, 12, 11),
+            4096: (16, 16, 16),
         }
         nx, ny, nz = shapes.get(target, (5, 4, 4))
         x_vals = self._cell_centers(xlim[0], xlim[1], nx)
@@ -1064,6 +1902,9 @@ class TrajectoryApp(MainWindowUI):
             256: (16, 16),
             384: (24, 16),
             512: (32, 16),
+            1024: (40, 26),
+            2048: (56, 36),
+            4096: (80, 52),
         }
         nx, ny = shapes.get(target, (10, 8))
         x_vals = self._cell_centers(xlim[0], xlim[1], nx)
@@ -1144,6 +1985,57 @@ class TrajectoryApp(MainWindowUI):
             f"(Wx={vector[0]:+.1f}, Wy={vector[1]:+.1f}, Wz={vector[2]:+.1f})"
         )
 
+    def _draw_dynamic_summary_panel(self, trajectories: list) -> None:
+        """Показывает ключевые параметры и результаты итогового расчёта модели 8."""
+        if not self.animation_data:
+            return
+
+        metadata = self.animation_data.get("metadata", {})
+        times_list = self.animation_data.get("times", [])
+        impacts = np.array([traj[-1] for traj in trajectories])
+        max_heights = np.array([float(np.max(traj[:, 1])) for traj in trajectories])
+        flight_times = np.array([float(times[-1]) for times in times_list]) if times_list else np.array([0.0])
+        _, _, cx, cz, sx, sz = compute_impact_ellipse(trajectories, 1)
+
+        panel = (
+            "ИТОГ РАСЧЁТА\n"
+            f"N: {len(trajectories)}\n"
+            f"Сценарий: {metadata.get('scenario', '—')}\n"
+            f"Wind: {float(metadata.get('wind_strength', 0.0)):.1f} м/с\n"
+            f"Turbulence: {float(metadata.get('turbulence', 0.0)):.1f}\n"
+            f"Средняя дальность: {float(np.mean(impacts[:, 0])):.1f} м\n"
+            f"Средняя высота max: {float(np.mean(max_heights)):.1f} м\n"
+            f"Среднее время: {float(np.mean(flight_times)):.2f} с\n"
+            f"Мишень: X={cx:.1f} м, Z={cz:.1f} м\n"
+            f"Разброс: σx={sx:.1f} м, σz={sz:.1f} м"
+        )
+        if self._presentation_export_active:
+            panel = (
+                "Итоги расчёта\n"
+                f"Сценарий: {metadata.get('scenario', '—')}\n"
+                f"N = {len(trajectories)}\n"
+                f"Средняя дальность: {float(np.mean(impacts[:, 0])):.1f} м\n"
+                f"Средняя макс. высота: {float(np.mean(max_heights)):.1f} м\n"
+                f"Среднее время: {float(np.mean(flight_times)):.2f} с\n"
+                f"Разброс: σx={sx:.1f} м, σz={sz:.1f} м"
+            )
+        self.main_ax.text2D(
+            0.985, 0.985,
+            panel,
+            transform=self.main_ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=9,
+            family="monospace",
+            color=(0.05, 0.05, 0.05),
+            bbox={
+                "boxstyle": "round,pad=0.45",
+                "facecolor": (1.0, 1.0, 1.0, 0.90),
+                "edgecolor": (0.65, 0.65, 0.65, 0.75),
+                "linewidth": 0.9,
+            },
+        )
+
     def _draw_frame_mini_panel(
         self,
         position: np.ndarray,
@@ -1154,11 +2046,30 @@ class TrajectoryApp(MainWindowUI):
         region_mode: str,
     ) -> None:
         """Показывает численные параметры текущего кадра поверх графика."""
+        metadata = self.animation_data.get("metadata", {}) if self.animation_data else {}
         speed = float(np.linalg.norm(wind))
+        run_range = None
+        run_max_height = None
+        run_index = self.anim_run_combo.currentIndex() - 1
+        if self.animation_data and run_index >= 0:
+            trajectories = self.animation_data.get("trajectories", [])
+            if run_index < len(trajectories):
+                traj = trajectories[run_index]
+                run_range = float(traj[-1, 0])
+                run_max_height = float(np.max(traj[:, 1]))
+
+        run_stats = ""
+        if run_range is not None and run_max_height is not None:
+            run_stats = (
+                f"Дальность запуска: {run_range:.1f} м\n"
+                f"Макс. высота запуска: {run_max_height:.1f} м\n"
+            )
         panel = (
             "КАДР РАСЧЁТА\n"
+            f"Сценарий: {metadata.get('scenario', '—')}\n"
             f"t: {time_s:.2f} c\n"
             f"Снаряд: X={position[0]:.1f} м, Y={position[1]:.1f} м, Z={position[2]:.1f} м\n"
+            f"{run_stats}"
             f"Локальный ветер: |W|={speed:.1f} м/с\n"
             f"  Wx дальность: {wind[0]:+.1f} м/с\n"
             f"  Wy вертикаль: {wind[1]:+.1f} м/с\n"
@@ -1166,20 +2077,30 @@ class TrajectoryApp(MainWindowUI):
             f"Камера: {camera_mode}\n"
             f"Стрелки: {region_mode}, {view_mode}"
         )
+        if self._presentation_export_active:
+            panel = (
+                "Кадр расчёта\n"
+                f"Сценарий: {metadata.get('scenario', '—')}\n"
+                f"t = {time_s:.2f} с\n"
+                f"Положение: X={position[0]:.1f} м, Y={position[1]:.1f} м, Z={position[2]:.1f} м\n"
+                f"{run_stats}"
+                f"Локальный ветер: |W|={speed:.1f} м/с\n"
+                f"Wx={wind[0]:+.1f}, Wy={wind[1]:+.1f}, Wz={wind[2]:+.1f} м/с"
+            )
         self.main_ax.text2D(
             0.985, 0.985,
             panel,
             transform=self.main_ax.transAxes,
             ha="right",
             va="top",
-            fontsize=8,
+            fontsize=9,
             family="monospace",
             color=(0.05, 0.05, 0.05),
             bbox={
-                "boxstyle": "round,pad=0.35",
-                "facecolor": (1.0, 1.0, 1.0, 0.86),
-                "edgecolor": (0.65, 0.65, 0.65, 0.70),
-                "linewidth": 0.8,
+                "boxstyle": "round,pad=0.45",
+                "facecolor": (1.0, 1.0, 1.0, 0.90),
+                "edgecolor": (0.65, 0.65, 0.65, 0.75),
+                "linewidth": 0.9,
             },
         )
 
@@ -1205,6 +2126,8 @@ class TrajectoryApp(MainWindowUI):
         self.anim_run_combo.clear()
         self.anim_run_combo.blockSignals(False)
         self.anim_export_gif_btn.setEnabled(False)
+        self.anim_export_png_btn.setEnabled(False)
+        self.anim_export_presentation_btn.setEnabled(False)
         self._set_animation_replay_enabled(False)
         self.animation_panel.setVisible(False)
 
@@ -1432,6 +2355,152 @@ class TrajectoryApp(MainWindowUI):
                 self.main_canvas.draw_idle()
             self.anim_export_gif_btn.setText("GIF")
             self.anim_export_gif_btn.setEnabled(True)
+
+    def _export_presentation_graph_png(self) -> None:
+        """Сохраняет текущий вид модели 8 в лаконичном виде для презентации/диплома."""
+        if not self.animation_data:
+            return
+
+        self.animation_timer.stop()
+        self.anim_play_btn.setText("Пуск")
+
+        metadata = self.animation_data.get("metadata", {})
+        scenario = str(metadata.get("scenario", "wind"))
+        run_index = self.anim_run_combo.currentIndex()
+        suffix = "summary" if run_index <= 0 else f"run_{run_index}_frame_{self.animation_frame:04d}"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = Path(__file__).parent / "exports"
+        export_dir.mkdir(exist_ok=True)
+        export_path = export_dir / f"{scenario}_{suffix}_presentation_{timestamp}.png"
+
+        old_elev, old_azim = self._current_3d_view()
+        camera_choice = QMessageBox.question(
+            self,
+            "Экспорт для презентации",
+            (
+                "Какой ракурс камеры использовать?\n\n"
+                "Да — оптимальный презентационный ракурс.\n"
+                "Нет — текущий ракурс, который вы выставили мышью."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if camera_choice == QMessageBox.StandardButton.Yes:
+            export_elev, export_azim = 24, -58
+        else:
+            export_elev, export_azim = old_elev, old_azim
+
+        old_text = self.anim_export_presentation_btn.text()
+        try:
+            self.anim_export_presentation_btn.setEnabled(False)
+            self.anim_export_presentation_btn.setText("PNG...")
+            self._presentation_export_active = True
+
+            if run_index <= 0:
+                self._render_dynamic_wind_summary()
+            else:
+                self._render_dynamic_wind_frame(self.animation_frame)
+            self.main_ax.view_init(elev=export_elev, azim=export_azim)
+            self.main_canvas.draw()
+            self.main_fig.savefig(
+                export_path,
+                format="png",
+                dpi=230,
+                facecolor="white",
+                bbox_inches="tight",
+                pad_inches=0.16,
+            )
+            QMessageBox.information(
+                self,
+                "Экспорт для презентации",
+                f"График сохранён:\n{export_path}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Экспорт для презентации",
+                f"Не удалось сохранить график:\n{exc}",
+            )
+        finally:
+            self._presentation_export_active = False
+            if run_index <= 0:
+                self._render_dynamic_wind_summary()
+            else:
+                self._render_dynamic_wind_frame(self.animation_frame)
+            self.main_ax.view_init(elev=old_elev, azim=old_azim)
+            self.main_canvas.draw_idle()
+            self.anim_export_presentation_btn.setText(old_text)
+            self.anim_export_presentation_btn.setEnabled(True)
+
+    def _export_current_graph_png(self) -> None:
+        """Сохраняет текущий график в PNG с высоким разрешением."""
+        if not self.animation_data:
+            return
+
+        self.animation_timer.stop()
+        self.anim_play_btn.setText("Пуск")
+
+        old_elev, old_azim = self._current_3d_view()
+        camera_choice = QMessageBox.question(
+            self,
+            "Экспорт скриншота",
+            (
+                "Какой ракурс камеры использовать?\n\n"
+                "Да — оптимальный презентационный ракурс.\n"
+                "Нет — текущий ракурс, который вы выставили мышью."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if camera_choice == QMessageBox.StandardButton.Yes:
+            export_elev, export_azim = 24, -58
+        else:
+            export_elev, export_azim = old_elev, old_azim
+
+        metadata = self.animation_data.get("metadata", {})
+        scenario = str(metadata.get("scenario", "wind"))
+        run_index = self.anim_run_combo.currentIndex()
+        frame_suffix = "summary"
+        if run_index > 0:
+            frame_suffix = f"run_{run_index}_frame_{self.animation_frame:04d}"
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = Path(__file__).parent / "exports"
+        export_dir.mkdir(exist_ok=True)
+        export_path = export_dir / f"{scenario}_{frame_suffix}_{timestamp}.png"
+
+        try:
+            self.anim_export_png_btn.setEnabled(False)
+            self.anim_export_png_btn.setText("PNG...")
+            self.main_ax.view_init(elev=export_elev, azim=export_azim)
+            self.main_canvas.draw()
+            self.main_fig.savefig(
+                export_path,
+                format="png",
+                dpi=220,
+                facecolor="white",
+                bbox_inches="tight",
+                pad_inches=0.12,
+            )
+            self.info_display.setText(
+                f"{self.info_display.toPlainText()}\n\nСкриншот графика сохранён:\n{export_path}"
+            )
+            QMessageBox.information(
+                self,
+                "Экспорт скриншота",
+                f"Скриншот сохранён:\n{export_path}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Экспорт скриншота",
+                f"Не удалось сохранить скриншот:\n{exc}",
+            )
+        finally:
+            self.main_ax.view_init(elev=old_elev, azim=old_azim)
+            self.main_canvas.draw_idle()
+            self.anim_export_png_btn.setText("Скриншот")
+            self.anim_export_png_btn.setEnabled(True)
 
     def _current_3d_view(self) -> tuple:
         """Возвращает текущий ракурс 3D-оси, чтобы кадры не сбрасывали поворот."""

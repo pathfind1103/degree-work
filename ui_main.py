@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QFormLayout, QTextEdit, QFrame,
     QPushButton, QLabel, QSizePolicy, QSplitter, QScrollArea,
-    QSlider,
+    QSlider, QToolButton,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
@@ -37,6 +37,7 @@ STYLE_INFO_BOX = (
     "border: 1px solid #ccc;"
     "color: black;"
     "padding: 5px;"
+    "font-size: 12px;"
 )
 STYLE_CALC_BUTTON = (
     "background-color: #4CAF50;"
@@ -48,9 +49,18 @@ STYLE_FORMULA_LABEL = (
     "background-color: #f0f0f0;"
     "border: 1px solid #ccc;"
     "border-radius: 2px;"
-    "min-height: 80px;"
+    "min-height: 110px;"
 )
 FORMULA_BG_COLOR = '#f0f0f0'
+STYLE_SECTION_TOGGLE = (
+    "QToolButton {"
+    "color: white;"
+    "font-weight: bold;"
+    "border: none;"
+    "padding: 4px 0;"
+    "text-align: left;"
+    "}"
+)
 
 
 class MainWindowUI(QMainWindow):
@@ -99,10 +109,10 @@ class MainWindowUI(QMainWindow):
         содержимое не обрезалось, а появлялась полоса прокрутки.
         """
         inner = QWidget()
-        inner.setMinimumWidth(220)
+        inner.setMinimumWidth(260)
         layout = QVBoxLayout(inner)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setSpacing(9)
 
         # Выбор модели
         layout.addWidget(QLabel("<b>Выберите модель:</b>"))
@@ -117,14 +127,23 @@ class MainWindowUI(QMainWindow):
         layout.addWidget(self.scenario_preset_combo)
 
         # Описание задачи
-        layout.addWidget(QLabel("<b>Описание задачи:</b>"))
+        self.info_toggle_btn, self.info_section = self._create_collapsible_section(
+            "Описание задачи",
+            expanded=True,
+        )
+        layout.addWidget(self.info_toggle_btn)
         self.info_display = QTextEdit(readOnly=True)
-        self.info_display.setMaximumHeight(160)
+        self.info_display.setMinimumHeight(190)
         self.info_display.setStyleSheet(STYLE_INFO_BOX)
-        layout.addWidget(self.info_display)
+        self.info_section.layout().addWidget(self.info_display)
+        layout.addWidget(self.info_section)
 
         # Формула (LaTeX → PNG → QLabel)
-        layout.addWidget(QLabel("<b>Математический аппарат:</b>"))
+        self.formula_toggle_btn, self.formula_section = self._create_collapsible_section(
+            "Математический аппарат",
+            expanded=True,
+        )
+        layout.addWidget(self.formula_toggle_btn)
         self.formula_label = QLabel()
         self.formula_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.formula_label.setStyleSheet(STYLE_FORMULA_LABEL)
@@ -133,7 +152,16 @@ class MainWindowUI(QMainWindow):
             QSizePolicy.Policy.Minimum,
         )
         self.formula_label.setWordWrap(True)
-        layout.addWidget(self.formula_label)
+        formula_scroll = QScrollArea()
+        formula_scroll.setWidget(self.formula_label)
+        formula_scroll.setWidgetResizable(True)
+        formula_scroll.setMinimumHeight(185)
+        formula_scroll.setMaximumHeight(260)
+        formula_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        formula_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        formula_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.formula_section.layout().addWidget(formula_scroll)
+        layout.addWidget(self.formula_section)
 
         # Отдельная Figure для рендеринга формул — НЕ привязана к Qt-канвасу.
         # FigureCanvasAgg создаётся каждый раз заново при рендеринге
@@ -152,13 +180,31 @@ class MainWindowUI(QMainWindow):
         layout.addWidget(QLabel("<b>Параметры системы:</b>"))
         self.params_container = QWidget()
         self.params_layout = QFormLayout(self.params_container)
-        self.params_layout.setSpacing(7)
+        self.params_layout.setSpacing(8)
+        self.params_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.params_container.setStyleSheet(
+            "QLabel { font-size: 12px; }"
+            "QLineEdit { min-height: 24px; padding: 2px 6px; font-size: 12px; }"
+        )
         layout.addWidget(self.params_container)
 
         # Кнопка расчёта
         self.calc_btn = QPushButton("ЗАПУСТИТЬ РАСЧЁТ", minimumHeight=48)
         self.calc_btn.setStyleSheet(STYLE_CALC_BUTTON)
         layout.addWidget(self.calc_btn)
+
+        self.export_basic_graph_btn = QPushButton("ЭКСПОРТ ГРАФИКА", minimumHeight=36)
+        self.export_basic_graph_btn.setEnabled(False)
+        layout.addWidget(self.export_basic_graph_btn)
+
+        self.export_compare_2d_btn = QPushButton("СРАВНИТЬ С ВАКУУМОМ", minimumHeight=36)
+        self.export_compare_2d_btn.setEnabled(False)
+        layout.addWidget(self.export_compare_2d_btn)
+
+        self.export_diploma_graph_btn = QPushButton("ГРАФИК ДЛЯ ДИПЛОМА", minimumHeight=36)
+        self.export_diploma_graph_btn.setEnabled(False)
+        self.export_diploma_graph_btn.setVisible(False)
+        layout.addWidget(self.export_diploma_graph_btn)
 
         layout.addStretch(1)
 
@@ -196,9 +242,13 @@ class MainWindowUI(QMainWindow):
 
         self.animation_panel = QWidget()
         self.animation_panel.setVisible(False)
-        anim_layout = QHBoxLayout(self.animation_panel)
+        anim_layout = QVBoxLayout(self.animation_panel)
         anim_layout.setContentsMargins(10, 6, 10, 6)
-        anim_layout.setSpacing(8)
+        anim_layout.setSpacing(5)
+        anim_top_layout = QHBoxLayout()
+        anim_top_layout.setSpacing(8)
+        anim_bottom_layout = QHBoxLayout()
+        anim_bottom_layout.setSpacing(8)
 
         self.anim_run_combo = QComboBox()
         self.anim_run_combo.setMinimumWidth(130)
@@ -212,9 +262,9 @@ class MainWindowUI(QMainWindow):
         self.anim_view_combo.addItems(["3D поле", "Вертикальный срез"])
         self.anim_view_combo.setMinimumWidth(130)
         self.anim_density_combo = QComboBox()
-        self.anim_density_combo.addItems(["40", "80", "160", "256", "384", "512"])
+        self.anim_density_combo.addItems(["40", "80", "160", "256", "384", "512", "1024", "2048", "4096"])
         self.anim_density_combo.setCurrentText("80")
-        self.anim_density_combo.setMinimumWidth(70)
+        self.anim_density_combo.setMinimumWidth(82)
         self.anim_zoom_label = QLabel("Zoom 35%")
         self.anim_zoom_label.setMinimumWidth(76)
         self.anim_zoom_slider = QSlider(Qt.Orientation.Horizontal)
@@ -227,6 +277,10 @@ class MainWindowUI(QMainWindow):
         self.anim_next_btn = QPushButton("Вперёд")
         self.anim_export_gif_btn = QPushButton("GIF")
         self.anim_export_gif_btn.setMinimumWidth(54)
+        self.anim_export_png_btn = QPushButton("Скриншот")
+        self.anim_export_png_btn.setMinimumWidth(82)
+        self.anim_export_presentation_btn = QPushButton("Презентация")
+        self.anim_export_presentation_btn.setMinimumWidth(100)
         self.anim_slider = QSlider(Qt.Orientation.Horizontal)
         self.anim_slider.setMinimum(0)
         self.anim_slider.setMaximum(0)
@@ -234,23 +288,52 @@ class MainWindowUI(QMainWindow):
         self.anim_time_label.setMinimumWidth(110)
         self.anim_time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        anim_layout.addWidget(self.anim_run_combo)
-        anim_layout.addWidget(self.anim_camera_combo)
-        anim_layout.addWidget(self.anim_region_combo)
-        anim_layout.addWidget(self.anim_view_combo)
-        anim_layout.addWidget(QLabel("Стрелки"))
-        anim_layout.addWidget(self.anim_density_combo)
-        anim_layout.addWidget(self.anim_zoom_label)
-        anim_layout.addWidget(self.anim_zoom_slider)
-        anim_layout.addWidget(self.anim_prev_btn)
-        anim_layout.addWidget(self.anim_play_btn)
-        anim_layout.addWidget(self.anim_next_btn)
-        anim_layout.addWidget(self.anim_export_gif_btn)
-        anim_layout.addWidget(self.anim_slider, 1)
-        anim_layout.addWidget(self.anim_time_label)
+        anim_top_layout.addWidget(self.anim_run_combo)
+        anim_top_layout.addWidget(self.anim_camera_combo)
+        anim_top_layout.addWidget(self.anim_region_combo)
+        anim_top_layout.addWidget(self.anim_view_combo)
+        anim_top_layout.addWidget(QLabel("Стрелки"))
+        anim_top_layout.addWidget(self.anim_density_combo)
+        anim_top_layout.addWidget(self.anim_zoom_label)
+        anim_top_layout.addWidget(self.anim_zoom_slider)
+        anim_top_layout.addStretch(1)
+        anim_top_layout.addWidget(self.anim_export_png_btn)
+        anim_top_layout.addWidget(self.anim_export_presentation_btn)
+        anim_top_layout.addWidget(self.anim_export_gif_btn)
+
+        anim_bottom_layout.addWidget(self.anim_prev_btn)
+        anim_bottom_layout.addWidget(self.anim_play_btn)
+        anim_bottom_layout.addWidget(self.anim_next_btn)
+        anim_bottom_layout.addWidget(self.anim_slider, 1)
+        anim_bottom_layout.addWidget(self.anim_time_label)
+
+        anim_layout.addLayout(anim_top_layout)
+        anim_layout.addLayout(anim_bottom_layout)
 
         chart_layout.addWidget(self.animation_panel)
         self.splitter.addWidget(chart_widget)
+
+    def _create_collapsible_section(self, title: str, expanded: bool) -> tuple:
+        """Создаёт простую разворачиваемую секцию левой панели."""
+        button = QToolButton()
+        button.setText(f"{'▼' if expanded else '▶'} {title}")
+        button.setCheckable(True)
+        button.setChecked(expanded)
+        button.setStyleSheet(STYLE_SECTION_TOGGLE)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        body.setVisible(expanded)
+
+        def toggle(checked: bool) -> None:
+            body.setVisible(checked)
+            button.setText(f"{'▼' if checked else '▶'} {title}")
+
+        button.toggled.connect(toggle)
+        return button, body
 
     # ------------------------------------------------------------------
     # Публичный метод рендеринга формулы

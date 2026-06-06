@@ -40,7 +40,7 @@ def get_info():
             "angle": "Угол броска к горизонту (градусы)",
             "azimuth": "Азимут стрельбы (градусы, 0 - строго по оси X)",
             "wx_mean": "Продольный ветер (м/с, попутный > 0)",
-            "wz_mean": "Боковой ветер (м/с, снос вправо > 0)",
+            "wz_mean": "Средний боковой ветер (м/с, снос вправо > 0)",
             "wind_std": "Флуктуации ветра (сигма, м/с)",
             "Cx": "Коэффициент лобового сопротивления"
         }
@@ -56,8 +56,8 @@ def get_params():
         "angle": "45.0",
         "azimuth": "0.0",
         "wx_mean": "-3.0",
-        "wz_mean": "5.0",
-        "wind_std": "2.0",
+        "wz_mean": "0.0",
+        "wind_std": "6.0",
         "Cx": "0.25",
         "m": "1.0",
         "S": "0.01"
@@ -76,8 +76,8 @@ def calculate(params):
     beta = np.radians(float(params.get('azimuth', 0.0)))
 
     wx_mean = float(params.get('wx_mean', -3.0))
-    wz_mean = float(params.get('wz_mean', 5.0))
-    wind_std = float(params.get('wind_std', 2.0))
+    wz_mean = float(params.get('wz_mean', 0.0))
+    wind_std = float(params.get('wind_std', 6.0))
 
     cx = float(params.get('Cx', 0.25))
     m = float(params.get('m', 1.0))

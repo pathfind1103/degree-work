@@ -170,7 +170,7 @@ def calculate(params):
         trajectory.append(new_state)
 
     data = np.array(trajectory)
-    return data[:, 0], data[:, 1], "Траектория (RK4 по системе (77))"
+    return data[:, 0], data[:, 1], "Траектория в атмосфере"
 
 
 # Для быстрой проверки модуля
