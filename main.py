@@ -24,6 +24,8 @@ from pathlib import Path
 
 import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 from PyQt6.QtWidgets import QApplication, QLineEdit, QMessageBox
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtCore import QTimer
@@ -234,6 +236,7 @@ class TrajectoryApp(MainWindowUI):
         self.anim_next_btn.clicked.connect(self._next_animation_frame)
         self.anim_export_gif_btn.clicked.connect(self._export_animation_gif)
         self.anim_export_png_btn.clicked.connect(self._export_current_graph_png)
+        self.anim_export_collage_btn.clicked.connect(self._export_animation_collage_png)
         self.anim_export_presentation_btn.clicked.connect(self._export_presentation_graph_png)
         self.anim_slider.valueChanged.connect(self._on_animation_slider_changed)
         self.anim_run_combo.currentIndexChanged.connect(self._on_animation_run_changed)
@@ -2111,6 +2114,7 @@ class TrajectoryApp(MainWindowUI):
         self.anim_camera_combo.setEnabled(enabled)
         self.anim_region_combo.setEnabled(enabled)
         self.anim_view_combo.setEnabled(enabled)
+        self.anim_export_collage_btn.setEnabled(enabled)
         self.anim_prev_btn.setEnabled(enabled)
         self.anim_play_btn.setEnabled(enabled)
         self.anim_next_btn.setEnabled(enabled)
@@ -2127,6 +2131,7 @@ class TrajectoryApp(MainWindowUI):
         self.anim_run_combo.blockSignals(False)
         self.anim_export_gif_btn.setEnabled(False)
         self.anim_export_png_btn.setEnabled(False)
+        self.anim_export_collage_btn.setEnabled(False)
         self.anim_export_presentation_btn.setEnabled(False)
         self._set_animation_replay_enabled(False)
         self.animation_panel.setVisible(False)
@@ -2355,6 +2360,224 @@ class TrajectoryApp(MainWindowUI):
                 self.main_canvas.draw_idle()
             self.anim_export_gif_btn.setText("GIF")
             self.anim_export_gif_btn.setEnabled(True)
+
+    def _export_animation_collage_png(self) -> None:
+        """Сохраняет четыре стадии выбранного запуска единым коллажем 2x2."""
+        if not self.animation_data:
+            return
+
+        run_combo_index = self.anim_run_combo.currentIndex()
+        if run_combo_index <= 0:
+            QMessageBox.information(
+                self,
+                "Экспорт четырёх кадров",
+                "Сначала выберите конкретный запуск в нижней панели.",
+            )
+            return
+
+        try:
+            from PIL import Image, ImageChops
+        except ImportError:
+            QMessageBox.warning(
+                self,
+                "Экспорт четырёх кадров",
+                "Для создания коллажа нужен пакет Pillow. В текущем Python он не найден.",
+            )
+            return
+
+        self.animation_timer.stop()
+        self.anim_play_btn.setText("Пуск")
+
+        old_frame = self.animation_frame
+        old_camera = self.anim_camera_combo.currentText()
+        old_region = self.anim_region_combo.currentText()
+        old_view = self.anim_view_combo.currentText()
+        old_density = self.anim_density_combo.currentText()
+        old_zoom = self.anim_zoom_slider.value()
+        old_elev, old_azim = self._current_3d_view()
+
+        camera_choice = QMessageBox.question(
+            self,
+            "Экспорт четырёх кадров",
+            (
+                "Какой ракурс камеры использовать?\n\n"
+                "Да — оптимальный презентационный ракурс.\n"
+                "Нет — текущий ракурс, который вы выставили мышью."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if camera_choice == QMessageBox.StandardButton.Yes:
+            export_elev, export_azim = 24, -58
+        else:
+            export_elev, export_azim = old_elev, old_azim
+
+        run_index = run_combo_index - 1
+        selected_trajectory = np.asarray(
+            self.animation_data["trajectories"][run_index], dtype=float
+        )
+        run_range = float(selected_trajectory[-1, 0])
+        run_max_height = float(np.max(selected_trajectory[:, 1]))
+        frame_times = np.asarray(self.animation_data["frame_times"], dtype=float)
+        run_times = np.asarray(self.animation_data["times"][run_index], dtype=float)
+        last_run_frame = int(
+            np.clip(np.searchsorted(frame_times, run_times[-1], side="right") - 1,
+                    0, len(frame_times) - 1)
+        )
+        fractions = np.array([0.08, 0.38, 0.68, 1.0])
+        export_frames = np.rint(fractions * last_run_frame).astype(int)
+
+        metadata = self.animation_data.get("metadata", {})
+        scenario = str(metadata.get("scenario", "wind"))
+        scenario_names = {
+            "calm": "спокойный",
+            "shear": "высотный сдвиг",
+            "storm": "штормовой",
+            "vortex": "вихревой",
+            "turbulent": "турбулентный",
+        }
+        scenario_title = scenario_names.get(scenario, scenario)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = Path(__file__).parent / "exports"
+        export_dir.mkdir(exist_ok=True)
+        export_path = export_dir / (
+            f"{scenario}_run_{run_combo_index}_four_frames_{timestamp}.png"
+        )
+
+        frame_images = []
+        frame_labels = []
+        old_text = self.anim_export_collage_btn.text()
+        try:
+            self.anim_export_collage_btn.setEnabled(False)
+            self.anim_export_collage_btn.setText("4 КАДРА...")
+
+            for number, frame_index in enumerate(export_frames, start=1):
+                self._render_dynamic_wind_frame(int(frame_index))
+                self.main_ax.view_init(elev=export_elev, azim=export_azim)
+
+                legend = self.main_ax.get_legend()
+                if legend is not None:
+                    legend.remove()
+                for artist in list(self.main_ax.texts):
+                    artist_text = artist.get_text().strip()
+                    if artist_text.startswith(("КАДР РАСЧЁТА", "Кадр расчёта")):
+                        artist.remove()
+                self.main_ax.set_title("")
+                self.main_canvas.draw()
+
+                buf = io.BytesIO()
+                self.main_fig.savefig(
+                    buf,
+                    format="png",
+                    dpi=150,
+                    facecolor="white",
+                    bbox_inches="tight",
+                    pad_inches=0.04,
+                )
+                buf.seek(0)
+                frame_image = Image.open(buf).convert("RGB")
+                white = Image.new("RGB", frame_image.size, "white")
+                content_box = ImageChops.difference(frame_image, white).getbbox()
+                if content_box:
+                    margin = 8
+                    left = max(content_box[0] - margin, 0)
+                    top = max(content_box[1] - margin, 0)
+                    right = min(content_box[2] + margin, frame_image.width)
+                    bottom = min(content_box[3] + margin, frame_image.height)
+                    frame_image = frame_image.crop((left, top, right, bottom))
+                frame_images.append(frame_image.copy())
+                buf.close()
+                frame_labels.append(f"t = {frame_times[frame_index]:.2f} с")
+
+                self.anim_export_collage_btn.setText(f"КАДР {number}/4")
+                QApplication.processEvents()
+
+            collage = Figure(figsize=(12.0, 8.9), facecolor="white")
+            FigureCanvasAgg(collage)
+            axes = collage.subplots(2, 2)
+            for ax, image, label in zip(axes.flat, frame_images, frame_labels):
+                ax.imshow(image)
+                ax.text(
+                    0.035,
+                    0.965,
+                    label,
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=12,
+                    bbox={
+                        "boxstyle": "round,pad=0.18",
+                        "facecolor": (1.0, 1.0, 1.0, 0.82),
+                        "edgecolor": "none",
+                    },
+                )
+                ax.axis("off")
+
+            legend_handles = [
+                Line2D([0], [0], color="navy", lw=3.0,
+                       label="Пройденный участок"),
+                Line2D([0], [0], color="crimson", marker="o", lw=0,
+                       markersize=8, label="Текущее положение"),
+                Line2D([0], [0], color="black", marker="x", lw=0,
+                       markersize=8, label="Точка падения"),
+                Line2D([0], [0], color="limegreen", lw=3.0,
+                       label="Локальный ветер"),
+            ]
+            collage.legend(
+                handles=legend_handles,
+                loc="lower center",
+                ncol=4,
+                fontsize=11,
+                frameon=True,
+                title=(
+                    f"Запуск {run_combo_index}, сценарий: {scenario_title}   |   "
+                    f"Дальность: {run_range:.1f} м   |   "
+                    f"Максимальная высота: {run_max_height:.1f} м"
+                ),
+                title_fontsize=11,
+                bbox_to_anchor=(0.5, 0.006),
+                columnspacing=1.55,
+                handlelength=2.5,
+            )
+            collage.subplots_adjust(
+                left=0.002,
+                right=0.998,
+                top=0.985,
+                bottom=0.105,
+                wspace=0.002,
+                hspace=0.018,
+            )
+            collage.savefig(
+                export_path,
+                format="png",
+                dpi=220,
+                facecolor="white",
+                bbox_inches="tight",
+                pad_inches=0.10,
+            )
+            QMessageBox.information(
+                self,
+                "Экспорт четырёх кадров",
+                f"Коллаж сохранён:\n{export_path}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Экспорт четырёх кадров",
+                f"Не удалось создать коллаж:\n{exc}",
+            )
+        finally:
+            self.anim_camera_combo.setCurrentText(old_camera)
+            self.anim_region_combo.setCurrentText(old_region)
+            self.anim_view_combo.setCurrentText(old_view)
+            self.anim_density_combo.setCurrentText(old_density)
+            self.anim_zoom_slider.setValue(old_zoom)
+            self.animation_frame = old_frame
+            self._render_dynamic_wind_frame(old_frame)
+            self.main_ax.view_init(elev=old_elev, azim=old_azim)
+            self.main_canvas.draw_idle()
+            self.anim_export_collage_btn.setText(old_text)
+            self.anim_export_collage_btn.setEnabled(True)
 
     def _export_presentation_graph_png(self) -> None:
         """Сохраняет текущий вид модели 8 в лаконичном виде для презентации/диплома."""

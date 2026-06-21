@@ -279,6 +279,11 @@ class MainWindowUI(QMainWindow):
         self.anim_export_gif_btn.setMinimumWidth(54)
         self.anim_export_png_btn = QPushButton("Скриншот")
         self.anim_export_png_btn.setMinimumWidth(82)
+        self.anim_export_collage_btn = QPushButton("4 КАДРА")
+        self.anim_export_collage_btn.setMinimumWidth(78)
+        self.anim_export_collage_btn.setToolTip(
+            "Сохранить четыре стадии выбранного запуска одним изображением"
+        )
         self.anim_export_presentation_btn = QPushButton("Презентация")
         self.anim_export_presentation_btn.setMinimumWidth(100)
         self.anim_slider = QSlider(Qt.Orientation.Horizontal)
@@ -298,6 +303,7 @@ class MainWindowUI(QMainWindow):
         anim_top_layout.addWidget(self.anim_zoom_slider)
         anim_top_layout.addStretch(1)
         anim_top_layout.addWidget(self.anim_export_png_btn)
+        anim_top_layout.addWidget(self.anim_export_collage_btn)
         anim_top_layout.addWidget(self.anim_export_presentation_btn)
         anim_top_layout.addWidget(self.anim_export_gif_btn)
 
